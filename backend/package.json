@@ -1,0 +1,13 @@
+{
+  "name": "justbeauty-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "nodemailer": "^6.10.1"
+  },
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  }
+}
