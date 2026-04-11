@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import sharp from "sharp";
 
 const ROOT = path.resolve(process.cwd());
 const DATA_DIR = path.join(ROOT, "data");
@@ -30,6 +31,9 @@ const defaultEnv = {
   SMTP_FROM_NAME: "Just Beauty",
   BOOKING_ADMIN_EMAIL: "contact@justbeauty.be",
   CONTACT_ADMIN_EMAIL: "contact@justbeauty.be",
+  TELEGRAM_BOT_TOKEN: "",
+  TELEGRAM_CHAT_ID: "",
+  TELEGRAM_WEBHOOK_SECRET_TOKEN: "",
   CALDAV_URL: "",
   CALDAV_USERNAME: "",
   CALDAV_PASSWORD: "",
@@ -37,6 +41,12 @@ const defaultEnv = {
   CALDAV_TIMEZONE: "Europe/Brussels",
   MOLLIE_API_KEY: "",
   LOYALTY_POINTS_PER_EURO: "1",
+  PROTECTION_ENABLED: "true",
+  PROTECTION_WATERMARK_TEXT: "Just Beauty - usage reserve",
+  PROTECTION_WATERMARK_OPACITY: "0.16",
+  PROTECTION_BLOCK_HOTLINK: "true",
+  PROTECTION_ALLOWED_EMBED_HOSTS: "just-beauty.be,www.just-beauty.be",
+  PROTECTION_REPORT_EMAIL: "contact@justbeauty.be",
 };
 
 const parseEnvFile = (raw) =>
@@ -281,6 +291,198 @@ const escapeHtml = (value) =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 
+const escapeXml = (value) =>
+  String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+
+const envToBoolean = (value, fallback = false) => {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) return fallback;
+  return ["1", "true", "yes", "on"].includes(normalized);
+};
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const hashSha256 = (buffer) => crypto.createHash("sha256").update(buffer).digest("hex");
+
+const normalizeHost = (raw) => {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  try {
+    const withProtocol = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    return new URL(withProtocol).hostname.toLowerCase();
+  } catch {
+    return value.replace(/^https?:\/\//i, "").split("/")[0].toLowerCase();
+  }
+};
+
+const getProtectionConfig = (env) => {
+  const allowedHosts = String(env.PROTECTION_ALLOWED_EMBED_HOSTS || "")
+    .split(",")
+    .map((entry) => normalizeHost(entry))
+    .filter(Boolean);
+
+  const baseHost = normalizeHost(env.PUBLIC_BASE_URL);
+  if (baseHost && !allowedHosts.includes(baseHost)) allowedHosts.push(baseHost);
+
+  return {
+    enabled: envToBoolean(env.PROTECTION_ENABLED, true),
+    watermarkText: String(env.PROTECTION_WATERMARK_TEXT || "Just Beauty - usage reserve").trim(),
+    watermarkOpacity: clamp(Number(env.PROTECTION_WATERMARK_OPACITY || 0.16), 0.05, 0.6),
+    blockHotlink: envToBoolean(env.PROTECTION_BLOCK_HOTLINK, true),
+    allowedHosts,
+    reportEmail: String(env.PROTECTION_REPORT_EMAIL || env.BOOKING_ADMIN_EMAIL || env.ADMIN_EMAIL || "").trim(),
+  };
+};
+
+const mimeFromDataUrl = (dataUrl) => {
+  const match = String(dataUrl || "").match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  return { mimeType: String(match[1] || "").toLowerCase(), base64: match[2] };
+};
+
+const extensionFromMimeType = (mimeType) => {
+  if (mimeType === "image/jpeg") return "jpg";
+  if (mimeType === "image/png") return "png";
+  if (mimeType === "image/webp") return "webp";
+  if (mimeType === "image/gif") return "gif";
+  if (mimeType === "image/svg+xml") return "svg";
+  return "bin";
+};
+
+const isRasterImageMimeType = (mimeType) => ["image/jpeg", "image/png", "image/webp"].includes(mimeType);
+
+const buildWatermarkOverlaySvg = ({ width, height, text, opacity }) => {
+  const safeText = escapeXml(text);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+  <defs>
+    <pattern id="p" width="340" height="220" patternUnits="userSpaceOnUse" patternTransform="rotate(-24)">
+      <text x="8" y="112" fill="rgba(255,255,255,${opacity})" font-family="Georgia, serif" font-size="26" letter-spacing="1.2">${safeText}</text>
+    </pattern>
+  </defs>
+  <rect x="0" y="0" width="${width}" height="${height}" fill="url(#p)" />
+</svg>`;
+};
+
+const bitCountBigInt = (value) => {
+  let count = 0;
+  let current = BigInt(value);
+  while (current) {
+    current &= current - 1n;
+    count += 1;
+  }
+  return count;
+};
+
+const hammingDistanceHex64 = (a, b) => {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+  try {
+    const left = BigInt(`0x${a}`);
+    const right = BigInt(`0x${b}`);
+    return bitCountBigInt(left ^ right);
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+};
+
+const computeDHash64 = async (buffer) => {
+  const { data } = await sharp(buffer)
+    .rotate()
+    .grayscale()
+    .resize(9, 8, { fit: "fill" })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  let bits = 0n;
+  for (let y = 0; y < 8; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      const left = data[(y * 9) + x];
+      const right = data[(y * 9) + x + 1];
+      bits = (bits << 1n) | (left > right ? 1n : 0n);
+    }
+  }
+  return bits.toString(16).padStart(16, "0");
+};
+
+const applyVisibleWatermark = async (buffer, mimeType, protectionConfig) => {
+  const image = sharp(buffer).rotate();
+  const metadata = await image.metadata();
+  const width = Number(metadata.width || 0);
+  const height = Number(metadata.height || 0);
+  if (!width || !height || !protectionConfig.watermarkText) return buffer;
+
+  const overlay = Buffer.from(
+    buildWatermarkOverlaySvg({
+      width,
+      height,
+      text: protectionConfig.watermarkText,
+      opacity: protectionConfig.watermarkOpacity,
+    }),
+    "utf8",
+  );
+  let output = image.composite([{ input: overlay, blend: "over" }]);
+  if (mimeType === "image/jpeg") output = output.jpeg({ quality: 90, mozjpeg: true });
+  if (mimeType === "image/png") output = output.png({ compressionLevel: 9 });
+  if (mimeType === "image/webp") output = output.webp({ quality: 90 });
+  return output.toBuffer();
+};
+
+const buildImageProtectionRecord = async ({ dataUrl, filename, protectionConfig }) => {
+  const parsed = mimeFromDataUrl(dataUrl);
+  if (!parsed) throw new Error("Invalid image payload");
+
+  const mimeType = parsed.mimeType;
+  const sourceBuffer = Buffer.from(parsed.base64, "base64");
+  const originalSha256 = hashSha256(sourceBuffer);
+  const extension = sanitizeFilename((filename || "").split(".").pop() || extensionFromMimeType(mimeType) || "png");
+  let outputBuffer = sourceBuffer;
+  let watermarkApplied = 0;
+
+  if (protectionConfig.enabled && isRasterImageMimeType(mimeType)) {
+    try {
+      outputBuffer = await applyVisibleWatermark(sourceBuffer, mimeType, protectionConfig);
+      watermarkApplied = 1;
+    } catch (error) {
+      console.warn("Watermark processing failed, fallback to source image:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  let phash64 = "";
+  try {
+    if (isRasterImageMimeType(mimeType)) {
+      phash64 = await computeDHash64(outputBuffer);
+    }
+  } catch (error) {
+    console.warn("Perceptual hash computation failed:", error instanceof Error ? error.message : error);
+  }
+
+  return {
+    mimeType,
+    extension,
+    outputBuffer,
+    originalSha256,
+    displayedSha256: hashSha256(outputBuffer),
+    phash64,
+    watermarkApplied,
+  };
+};
+
+const computeContentFingerprint = ({ key, value, secret }) => {
+  const payload = `${String(key || "").trim()}::${String(value || "")}`;
+  const sha256 = hashSha256(Buffer.from(payload, "utf8"));
+  const tag = crypto
+    .createHmac("sha256", String(secret || "justbeauty-content-tag"))
+    .update(payload)
+    .digest("hex")
+    .slice(0, 12);
+  return { sha256, tag };
+};
+
 const renderMailShell = ({ title, eyebrow, intro, details, closing, cta, logoUrl }) => `
   <div style="margin:0;padding:32px;background:#f8f1ec;font-family:Georgia,'Times New Roman',serif;color:#453530;">
     <div style="max-width:640px;margin:0 auto;background:#fffaf7;border-radius:24px;overflow:hidden;box-shadow:0 12px 40px rgba(91,67,57,0.12);border:1px solid #efddd2;">
@@ -300,6 +502,55 @@ const renderMailShell = ({ title, eyebrow, intro, details, closing, cta, logoUrl
     </div>
   </div>
 `;
+
+const GIFT_CARD_THEMES = {
+  fun_party: {
+    label: "Drole - Party",
+    imagePath: "/assets/gift/fun-party.png",
+    frame: "#ffccbc",
+    text: "#3e2723",
+  },
+  fun_pop: {
+    label: "Drole - Pop",
+    imagePath: "/assets/gift/fun-pop.png",
+    frame: "#f8bbd0",
+    text: "#311b92",
+  },
+  glam_chic: {
+    label: "Glamour - Chic",
+    imagePath: "/assets/gift/glam-chic.png",
+    frame: "#d7ccc8",
+    text: "#fff8f2",
+  },
+  glam_luxe: {
+    label: "Glamour - Luxe",
+    imagePath: "/assets/gift/glam-luxe.png",
+    frame: "#cdb7a6",
+    text: "#fff7ef",
+  },
+};
+
+const normalizeGiftCardTheme = (value) => {
+  const key = String(value || "").trim();
+  return GIFT_CARD_THEMES[key] ? key : "glam_chic";
+};
+
+const buildGiftCardEmailCardHtml = ({ giftCard, customer, publicBaseUrl }) => {
+  const themeKey = normalizeGiftCardTheme(giftCard.theme_style);
+  const theme = GIFT_CARD_THEMES[themeKey];
+  const ownerName = String(giftCard.recipient_name || `${customer.first_name || ""} ${customer.last_name || ""}`).trim() || "Cliente";
+  const messageLine = String(giftCard.message || "").trim();
+  const backgroundImageUrl = `${String(publicBaseUrl || "").replace(/\/$/, "")}${theme.imagePath}`;
+  return `
+    <div style="border:1px solid ${theme.frame};border-radius:20px;overflow:hidden;background-image:url('${escapeHtml(backgroundImageUrl)}');background-size:cover;background-position:center;background-repeat:no-repeat;padding:22px 22px 18px;box-shadow:0 12px 30px rgba(0,0,0,0.14);">
+      <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:${theme.text};opacity:.92;margin-bottom:10px;">Just Beauty - cheque cadeau</div>
+      <div style="font-size:28px;line-height:1.15;font-weight:700;color:${theme.text};margin-bottom:14px;">${escapeHtml(Number(giftCard.amount || 0).toFixed(2))} ${escapeHtml(giftCard.currency || "EUR")}</div>
+      <div style="font-size:14px;line-height:1.5;color:${theme.text};margin-bottom:8px;"><strong>Pour :</strong> ${escapeHtml(ownerName)}</div>
+      <div style="font-size:14px;line-height:1.5;color:${theme.text};margin-bottom:8px;"><strong>Code :</strong> ${escapeHtml(giftCard.code || "")}</div>
+      ${messageLine ? `<div style="font-size:14px;line-height:1.5;color:${theme.text};"><strong>Message :</strong> ${escapeHtml(messageLine)}</div>` : ""}
+    </div>
+  `;
+};
 
 const renderActionPage = ({ title, message, actionLabel }) => `
   <!doctype html>
@@ -421,6 +672,35 @@ const bootstrapDb = (db, env) => {
       sort_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS media_protection_assets (
+      id TEXT PRIMARY KEY,
+      gallery_image_id TEXT NOT NULL UNIQUE,
+      original_sha256 TEXT NOT NULL,
+      displayed_sha256 TEXT NOT NULL,
+      phash64 TEXT NOT NULL DEFAULT '',
+      watermark_text TEXT NOT NULL DEFAULT '',
+      watermark_applied INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (gallery_image_id) REFERENCES gallery_images(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS media_protection_events (
+      id TEXT PRIMARY KEY,
+      asset_id TEXT,
+      event_type TEXT NOT NULL,
+      source_url TEXT NOT NULL DEFAULT '',
+      reporter TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (asset_id) REFERENCES media_protection_assets(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS content_fingerprints (
+      id TEXT PRIMARY KEY,
+      content_key TEXT NOT NULL UNIQUE,
+      sha256 TEXT NOT NULL,
+      canary_tag TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS site_content (
       id TEXT PRIMARY KEY,
       key TEXT NOT NULL UNIQUE,
@@ -478,6 +758,30 @@ const bootstrapDb = (db, env) => {
       created_at TEXT NOT NULL,
       FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
       FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS gift_cards (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT NOT NULL,
+      code TEXT NOT NULL UNIQUE,
+      amount REAL NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'EUR',
+      recipient_name TEXT NOT NULL DEFAULT '',
+      recipient_email TEXT NOT NULL DEFAULT '',
+      message TEXT NOT NULL DEFAULT '',
+      theme_style TEXT NOT NULL DEFAULT 'glam_chic',
+      payment_method TEXT NOT NULL DEFAULT 'bank_transfer',
+      payment_reference TEXT NOT NULL DEFAULT '',
+      bank_account_snapshot TEXT NOT NULL DEFAULT '',
+      bank_name_snapshot TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending_payment',
+      admin_note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      validated_at TEXT NOT NULL DEFAULT '',
+      expires_at TEXT NOT NULL DEFAULT '',
+      used_at TEXT NOT NULL DEFAULT '',
+      expiration_reminder_sent_at TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE
     );
   `);
   try {
@@ -570,6 +874,24 @@ const bootstrapDb = (db, env) => {
     } catch {
       // Column already exists on migrated databases.
     }
+    try {
+      db.exec("ALTER TABLE gift_cards ADD COLUMN expiration_reminder_sent_at TEXT NOT NULL DEFAULT '';");
+    } catch {
+      // Column already exists on migrated databases.
+    }
+    try {
+      db.exec("ALTER TABLE gift_cards ADD COLUMN theme_style TEXT NOT NULL DEFAULT 'glam_chic';");
+    } catch {
+      // Column already exists on migrated databases.
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_media_protection_assets_displayed_sha256 ON media_protection_assets(displayed_sha256);
+      CREATE INDEX IF NOT EXISTS idx_media_protection_assets_original_sha256 ON media_protection_assets(original_sha256);
+      CREATE INDEX IF NOT EXISTS idx_media_protection_assets_phash64 ON media_protection_assets(phash64);
+      CREATE INDEX IF NOT EXISTS idx_media_protection_events_type_created ON media_protection_events(event_type, created_at);
+      CREATE INDEX IF NOT EXISTS idx_gift_cards_customer_created ON gift_cards(customer_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_gift_cards_status_expires ON gift_cards(status, expires_at);
+    `);
 
   const adminCount = db.prepare("SELECT COUNT(*) AS count FROM admins").get().count;
   if (!adminCount) {
@@ -654,6 +976,9 @@ const bootstrapDb = (db, env) => {
     ["payment_bank_account", ""],
     ["payment_bank_name", "Just Beauty"],
     ["payment_bank_reference_prefix", "ACOMPTE"],
+    ["giftcard_bank_account", ""],
+    ["giftcard_bank_name", "Just Beauty"],
+    ["giftcard_transfer_instructions", "Veuillez indiquer la reference du cheque cadeau dans la communication du virement."],
     ["payment_mollie_mode", "test"],
     ["payment_mollie_test_api_key", ""],
     ["payment_mollie_live_api_key", ""],
@@ -684,6 +1009,30 @@ const bootstrapDb = (db, env) => {
   ].forEach(([key, oldValue, newValue]) => {
     db.prepare("UPDATE site_content SET value = ?, updated_at = ? WHERE key = ? AND value = ?")
       .run(newValue, new Date().toISOString(), key, oldValue);
+  });
+  const contentRows = db.prepare("SELECT key, value FROM site_content").all();
+  const upsertFingerprint = db.prepare(`
+    INSERT INTO content_fingerprints (id, content_key, sha256, canary_tag, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(content_key) DO UPDATE SET
+      sha256 = excluded.sha256,
+      canary_tag = excluded.canary_tag,
+      updated_at = excluded.updated_at
+  `);
+  const fingerprintNow = new Date().toISOString();
+  contentRows.forEach((row) => {
+    const fingerprint = computeContentFingerprint({
+      key: row.key,
+      value: row.value,
+      secret: env.SESSION_SECRET,
+    });
+    upsertFingerprint.run(
+      crypto.randomUUID(),
+      row.key,
+      fingerprint.sha256,
+      `JB-${fingerprint.tag}`,
+      fingerprintNow,
+    );
   });
 
   const weeklyScheduleCount = db.prepare("SELECT COUNT(*) AS count FROM weekly_schedule").get().count;
@@ -742,8 +1091,13 @@ const makeJsonHelpers = (env, req) => {
       res.writeHead(statusCode, { ...baseHeaders, "Content-Type": "text/html; charset=utf-8" });
       res.end(payload);
     },
-    file(res, filePath) {
-      res.writeHead(200, { ...baseHeaders, "Content-Type": getMimeType(filePath) });
+    file(res, filePath, extraHeaders = {}) {
+      res.writeHead(200, {
+        ...baseHeaders,
+        "Content-Type": getMimeType(filePath),
+        "X-Robots-Tag": "noimageai, noai",
+        ...extraHeaders,
+      });
       createReadStream(filePath).pipe(res);
     },
   };
@@ -940,6 +1294,105 @@ const createMollieClient = (apiKey) => {
   };
 };
 
+const createTelegramNotifier = (env) => {
+  const botToken = String(env.TELEGRAM_BOT_TOKEN || "").trim();
+  const chatId = String(env.TELEGRAM_CHAT_ID || "").trim();
+
+  if (!botToken || !chatId) {
+    console.warn("Telegram notifications disabled: missing configuration");
+    return {
+      sendBookingCreatedAlert: async () => {},
+      answerCallbackQuery: async () => {},
+      sendActionResult: async () => {},
+      clearInlineKeyboard: async () => {},
+    };
+  }
+
+  const apiBase = `https://api.telegram.org/bot${botToken}`;
+  const buildServiceLabel = (service) => [service.category, service.name].filter(Boolean).join(" - ");
+  const sendRequest = async (method, payload) => {
+    const response = await fetch(`${apiBase}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Telegram API ${method} failed (${response.status}): ${body}`);
+    }
+
+    const data = await response.json();
+    if (!data?.ok) {
+      throw new Error(`Telegram API ${method} rejected payload`);
+    }
+    return data;
+  };
+
+  return {
+    async sendBookingCreatedAlert({ booking, service, actionLinks }) {
+      const serviceLabel = buildServiceLabel(service);
+      const confirmCallbackData = `booking_action:confirmed:${booking.id}`;
+      const refuseCallbackData = `booking_action:refused:${booking.id}`;
+      const text = [
+        "<b>Nouvelle demande de rendez-vous</b>",
+        "",
+        `<b>Cliente:</b> ${escapeHtml(booking.client_name)}`,
+        `<b>Email:</b> ${escapeHtml(booking.client_email)}`,
+        `<b>Telephone:</b> ${escapeHtml(booking.client_phone || "Non renseigne")}`,
+        `<b>Service:</b> ${escapeHtml(serviceLabel)}`,
+        `<b>Date:</b> ${escapeHtml(booking.booking_date)}`,
+        `<b>Heure:</b> ${escapeHtml(String(booking.booking_time || "").slice(0, 5))}`,
+        "",
+        "Action rapide Telegram via boutons ci-dessous.",
+        `<a href="${escapeHtml(actionLinks.confirm)}">Lien confirmer</a> | <a href="${escapeHtml(actionLinks.refuse)}">Lien refuser</a>`,
+      ].join("\n");
+
+      await sendRequest("sendMessage", {
+        chat_id: chatId,
+        text,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "Confirmer", callback_data: confirmCallbackData },
+              { text: "Refuser", callback_data: refuseCallbackData },
+            ],
+          ],
+        },
+      });
+      console.log("Admin Telegram notification sent");
+    },
+    async answerCallbackQuery({ callbackQueryId, text, showAlert = false }) {
+      await sendRequest("answerCallbackQuery", {
+        callback_query_id: callbackQueryId,
+        text: String(text || "").slice(0, 180),
+        show_alert: Boolean(showAlert),
+      });
+    },
+    async sendActionResult({ chatId: targetChatId, bookingId, action, status, success = true, reason = "" }) {
+      const actionLabel = action === "confirmed" ? "confirmee" : "refusee";
+      const suffix = status && status !== action ? ` (etat actuel: ${status})` : "";
+      const resultLabel = success ? "Action effectuee" : "Action non appliquee";
+      const reasonLabel = reason ? ` - ${reason}` : "";
+      await sendRequest("sendMessage", {
+        chat_id: targetChatId || chatId,
+        text: `${resultLabel}: reservation ${bookingId} ${actionLabel}${suffix}${reasonLabel}`,
+      });
+    },
+    async clearInlineKeyboard({ chatId: targetChatId, messageId }) {
+      if (!targetChatId || !messageId) return;
+      await sendRequest("editMessageReplyMarkup", {
+        chat_id: targetChatId,
+        message_id: messageId,
+        reply_markup: { inline_keyboard: [] },
+      });
+    },
+  };
+};
+
+
 const createMailer = async (env) => {
   const logoUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/logo.jpg`;
   const buildServiceLabel = (service) => [service.category, service.name].filter(Boolean).join(" - ");
@@ -953,6 +1406,11 @@ const createMailer = async (env) => {
         sendPaymentIssueEmail: async () => {},
         sendCustomerDeletionScheduledEmail: async () => {},
         sendBookingBalancePaymentEmail: async () => {},
+        sendGiftCardRequestConfirmationEmail: async () => {},
+        sendGiftCardValidatedEmail: async () => {},
+        sendGiftCardActivatedEmail: async () => {},
+        sendGiftCardBeneficiaryEmail: async () => {},
+        sendGiftCardExpiryReminderEmail: async () => {},
       };
   }
 
@@ -980,16 +1438,16 @@ const createMailer = async (env) => {
           const clientHtml = renderMailShell({
             logoUrl,
             eyebrow: "Just Beauty",
-            title: `Votre demande pour ${serviceLabel} est bien enregistree`,
-            intro: `Bonjour ${booking.client_name}, votre demande de rendez-vous a bien ete recue et attend maintenant la confirmation de Justine.`,
+            title: `Votre demande pour ${serviceLabel} est bien enregistrée`,
+            intro: `Bonjour ${booking.client_name}, votre demande de rendez-vous a bien été reçue et attend maintenant la confirmation de Justine.`,
             details: [
               { label: "Cliente", value: booking.client_name },
               { label: "Service", value: serviceLabel },
               { label: "Date", value: booking.booking_date },
               { label: "Heure", value: booking.booking_time.slice(0, 5) },
-              { label: "Telephone", value: booking.client_phone || "Non renseigne" },
+              { label: "Téléphone", value: booking.client_phone || "Non renseigné" },
             ],
-            closing: "Merci pour votre confiance. Pensez aussi a verifier votre dossier spam ou courrier indesirable.",
+            closing: "Merci pour votre confiance. Pensez aussi à vérifier votre dossier spam ou courrier indésirable.",
           });
 
           const adminCta = `
@@ -999,25 +1457,25 @@ const createMailer = async (env) => {
 
           const adminHtml = renderMailShell({
             logoUrl,
-            eyebrow: "Nouvelle reservation",
+            eyebrow: "Nouvelle réservation",
             title: `Nouvelle demande: ${booking.client_name} - ${serviceLabel}`,
-            intro: "Vous pouvez traiter ce rendez-vous directement depuis cet email, sans passer par l'administration.",
+            intro: "Vous pouvez traiter ce rendez-vous directement depuis cet e-mail, sans passer par l'administration.",
             details: [
               { label: "Cliente", value: booking.client_name },
               { label: "Email", value: booking.client_email },
-              { label: "Telephone", value: booking.client_phone || "Non renseigne" },
+              { label: "Téléphone", value: booking.client_phone || "Non renseigné" },
               { label: "Service", value: serviceLabel },
               { label: "Date", value: booking.booking_date },
               { label: "Heure", value: booking.booking_time.slice(0, 5) },
             ],
             cta: adminCta,
-            closing: "En cas de refus, la cliente sera invitee a reprogrammer son rendez-vous.",
+            closing: "En cas de refus, la cliente sera invitée à reprogrammer son rendez-vous.",
           });
 
           const infoClient = await transporter.sendMail({
             from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
             to: booking.client_email,
-            subject: `Just Beauty | Demande recue - ${booking.client_name} - ${serviceLabel}`,
+            subject: `Just Beauty | Demande reçue - ${booking.client_name} - ${serviceLabel}`,
             html: clientHtml,
           });
 
@@ -1026,7 +1484,7 @@ const createMailer = async (env) => {
           const infoAdmin = await transporter.sendMail({
             from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
             to: env.BOOKING_ADMIN_EMAIL || env.SMTP_FROM_EMAIL || env.ADMIN_EMAIL,
-            subject: `Just Beauty | Nouvelle reservation - ${booking.client_name} - ${serviceLabel}`,
+            subject: `Just Beauty | Nouvelle réservation - ${booking.client_name} - ${serviceLabel}`,
             html: adminHtml,
           });
 
@@ -1046,20 +1504,20 @@ const createMailer = async (env) => {
           const clientHtml = renderMailShell({
             logoUrl,
             eyebrow: isConfirmed
-              ? "Rendez-vous confirme"
+              ? "Rendez-vous confirmé"
               : isCancelled
-                ? "Rendez-vous annule"
-                : "Rendez-vous a reprogrammer",
+                ? "Rendez-vous annulé"
+                : "Rendez-vous à reprogrammer",
             title: isConfirmed
-              ? `Votre rendez-vous pour ${serviceLabel} est confirme`
+              ? `Votre rendez-vous pour ${serviceLabel} est confirmé`
               : isCancelled
-                ? `Votre rendez-vous pour ${serviceLabel} a ete annule`
-                : `Votre rendez-vous pour ${serviceLabel} n'a pas pu etre maintenu`,
+                ? `Votre rendez-vous pour ${serviceLabel} a été annulé`
+                : `Votre rendez-vous pour ${serviceLabel} n'a pas pu être maintenu`,
             intro: isConfirmed
-              ? `Bonjour ${booking.client_name}, bonne nouvelle: votre rendez-vous vient d'etre confirme par Just Beauty.`
+              ? `Bonjour ${booking.client_name}, bonne nouvelle : votre rendez-vous vient d'être confirmé par Just Beauty.`
               : isCancelled
-                ? `Bonjour ${booking.client_name}, votre rendez-vous a ete annule avant la date prevue.`
-                : `Bonjour ${booking.client_name}, votre demande n'a malheureusement pas pu etre maintenue sur le creneau choisi.`,
+                ? `Bonjour ${booking.client_name}, votre rendez-vous a été annulé avant la date prévue.`
+                : `Bonjour ${booking.client_name}, votre demande n'a malheureusement pas pu être maintenue sur le créneau choisi.`,
             details: [
               { label: "Cliente", value: booking.client_name },
               { label: "Service", value: serviceLabel },
@@ -1070,20 +1528,20 @@ const createMailer = async (env) => {
               ? `<a href="${escapeHtml(`${publicBaseUrl}/rendez-vous`)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Reprogrammer mon rendez-vous</a>`
               : "",
             closing: isConfirmed
-              ? "Pensez a verifier egalement vos spams si vous ne retrouvez pas nos prochains emails."
+              ? "Pensez à vérifier également vos spams si vous ne retrouvez pas nos prochains e-mails."
               : isCancelled
-                ? "Si vous souhaitez reprendre rendez-vous, vous pouvez choisir un nouveau creneau directement sur le site."
-                : "Nous vous invitons a reprogrammer un nouveau moment cocooning via le site quand vous le souhaitez.",
+                ? "Si vous souhaitez reprendre rendez-vous, vous pouvez choisir un nouveau créneau directement sur le site."
+                : "Nous vous invitons à reprogrammer un nouveau moment cocooning via le site quand vous le souhaitez.",
           });
 
           const info = await transporter.sendMail({
             from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
             to: booking.client_email,
             subject: isConfirmed
-              ? `Just Beauty | Rendez-vous confirme - ${booking.client_name} - ${serviceLabel}`
+              ? `Just Beauty | Rendez-vous confirmé - ${booking.client_name} - ${serviceLabel}`
               : isCancelled
-                ? `Just Beauty | Rendez-vous annule - ${booking.client_name} - ${serviceLabel}`
-                : `Just Beauty | Rendez-vous a reprogrammer - ${booking.client_name} - ${serviceLabel}`,
+                ? `Just Beauty | Rendez-vous annulé - ${booking.client_name} - ${serviceLabel}`
+                : `Just Beauty | Rendez-vous à reprogrammer - ${booking.client_name} - ${serviceLabel}`,
             html: clientHtml,
           });
 
@@ -1098,25 +1556,25 @@ const createMailer = async (env) => {
           const adminHtml = renderMailShell({
             logoUrl,
             eyebrow: "Nouveau message",
-            title: "Le formulaire de contact vient d'etre utilise",
-            intro: "Un message client vient d'etre envoye depuis le site Just Beauty.",
+            title: "Le formulaire de contact vient d'être utilisé",
+            intro: "Un message client vient d'être envoyé depuis le site Just Beauty.",
             details: [
               { label: "Nom", value: message.client_name },
               { label: "Email", value: message.client_email },
-              { label: "Telephone", value: message.client_phone || "Non renseigne" },
+              { label: "Téléphone", value: message.client_phone || "Non renseigné" },
               { label: "Message", value: message.message },
             ],
-            closing: "Vous pouvez repondre directement a l'adresse email de la cliente si necessaire.",
+            closing: "Vous pouvez répondre directement à l'adresse e-mail de la cliente si nécessaire.",
           });
 
           const clientHtml = renderMailShell({
             logoUrl,
             eyebrow: "Just Beauty",
-            title: "Votre message a bien ete envoye",
-            intro: `Bonjour ${message.client_name}, nous avons bien recu votre message et nous reviendrons vers vous rapidement.`,
+            title: "Votre message a bien été envoyé",
+            intro: `Bonjour ${message.client_name}, nous avons bien reçu votre message et nous reviendrons vers vous rapidement.`,
             details: [
               { label: "Email", value: message.client_email },
-              { label: "Telephone", value: message.client_phone || "Non renseigne" },
+              { label: "Téléphone", value: message.client_phone || "Non renseigné" },
               { label: "Message", value: message.message },
             ],
             closing: "Merci pour votre confiance.",
@@ -1133,7 +1591,7 @@ const createMailer = async (env) => {
           await transporter.sendMail({
             from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
             to: message.client_email,
-            subject: "Just Beauty | Nous avons bien recu votre message",
+            subject: "Just Beauty | Nous avons bien reçu votre message",
             html: clientHtml,
           });
         } catch (error) {
@@ -1145,17 +1603,17 @@ const createMailer = async (env) => {
         try {
           const adminHtml = renderMailShell({
             logoUrl,
-            eyebrow: "Probleme paiement",
-            title: "Un incident de paiement a ete signale",
-            intro: "Un signalement a ete envoye depuis le parcours de reservation pour aider au debogage du paiement.",
+            eyebrow: "Problème paiement",
+            title: "Un incident de paiement a été signalé",
+            intro: "Un signalement a été envoyé depuis le parcours de réservation pour aider au débogage du paiement.",
             details: [
-              { label: "Nom", value: report.client_name || "Non renseigne" },
-              { label: "Email", value: report.client_email || "Non renseigne" },
-              { label: "Telephone", value: report.client_phone || "Non renseigne" },
-              { label: "Service", value: report.service_label || "Non renseigne" },
-              { label: "Date / heure", value: report.booking_slot || "Non renseigne" },
-              { label: "Mode acompte", value: report.deposit_method || "Non renseigne" },
-              { label: "Erreur", value: report.error_message || "Non renseignee" },
+              { label: "Nom", value: report.client_name || "Non renseigné" },
+              { label: "E-mail", value: report.client_email || "Non renseigné" },
+              { label: "Téléphone", value: report.client_phone || "Non renseigné" },
+              { label: "Service", value: report.service_label || "Non renseigné" },
+              { label: "Date / heure", value: report.booking_slot || "Non renseigné" },
+              { label: "Mode acompte", value: report.deposit_method || "Non renseigné" },
+              { label: "Erreur", value: report.error_message || "Non renseignée" },
             ],
             closing: "Les journaux techniques complets sont inclus ci-dessous pour l'analyse.",
             cta: `<pre style="white-space:pre-wrap;word-break:break-word;background:#fffaf7;border:1px solid #efddd2;border-radius:16px;padding:16px;font-size:12px;line-height:1.6;color:#5b4339;overflow:auto;">${escapeHtml(JSON.stringify(report.logs || {}, null, 2))}</pre>`,
@@ -1179,13 +1637,13 @@ const createMailer = async (env) => {
         const daysLabel = requestedBy === "customer" ? "3 jours" : "30 jours";
         const clientHtml = renderMailShell({
           logoUrl,
-          eyebrow: "Suppression planifiee",
-          title: `Votre compte client sera supprime dans ${daysLabel}`,
-          intro: `Bonjour ${customer.first_name}, une demande de suppression de votre compte Just Beauty a ete enregistree.`,
+          eyebrow: "Suppression planifiée",
+          title: `Votre compte client sera supprimé dans ${daysLabel}`,
+          intro: `Bonjour ${customer.first_name}, une demande de suppression de votre compte Just Beauty a été enregistrée.`,
           details: [
             { label: "Compte", value: customer.email },
-            { label: "Demande initiee par", value: requestedBy === "customer" ? "vous-meme" : "l'administration" },
-            { label: "Suppression prevue le", value: scheduledFor.slice(0, 10) },
+            { label: "Demande initiée par", value: requestedBy === "customer" ? "vous-même" : "l'administration" },
+            { label: "Suppression prévue le", value: scheduledFor.slice(0, 10) },
           ],
           cta: `<a href="${escapeHtml(`${publicBaseUrl}/mon-compte`)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Consulter mon compte</a>`,
           closing: "Si vous souhaitez conserver votre compte, contactez rapidement Just Beauty avant cette date.",
@@ -1194,7 +1652,7 @@ const createMailer = async (env) => {
         await transporter.sendMail({
           from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
           to: customer.email,
-          subject: "Just Beauty | Suppression planifiee de votre compte client",
+          subject: "Just Beauty | Suppression planifiée de votre compte client",
           html: clientHtml,
         });
       },
@@ -1203,23 +1661,131 @@ const createMailer = async (env) => {
         const clientHtml = renderMailShell({
           logoUrl,
           eyebrow: "Paiement du solde",
-          title: `Le solde de votre prestation ${serviceLabel} est pret`,
-          intro: `Bonjour ${booking.client_name}, vous pouvez maintenant regler le solde de votre rendez-vous en ligne via Mollie.`,
+          title: `Le solde de votre prestation ${serviceLabel} est prêt`,
+          intro: `Bonjour ${booking.client_name}, vous pouvez maintenant régler le solde de votre rendez-vous en ligne via Mollie.`,
           details: [
             { label: "Cliente", value: booking.client_name },
             { label: "Service", value: serviceLabel },
             { label: "Date", value: booking.booking_date },
             { label: "Heure", value: booking.booking_time.slice(0, 5) },
-            { label: "Montant a regler", value: `${Number(amountValue || 0).toFixed(2)} EUR` },
+            { label: "Montant à régler", value: `${Number(amountValue || 0).toFixed(2)} EUR` },
           ],
           cta: `<a href="${escapeHtml(checkoutUrl)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Payer le solde</a>`,
-          closing: `Si besoin, vous pouvez egalement retrouver votre rendez-vous sur ${escapeHtml(publicBaseUrl)}.`,
+          closing: `Si besoin, vous pouvez également retrouver votre rendez-vous sur ${escapeHtml(publicBaseUrl)}.`,
         });
 
         await transporter.sendMail({
           from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
           to: booking.client_email,
           subject: `Just Beauty | Paiement du solde - ${booking.client_name} - ${serviceLabel}`,
+          html: clientHtml,
+        });
+      },
+      async sendGiftCardRequestConfirmationEmail({ customer, giftCard, paymentDetails, publicBaseUrl }) {
+        const clientHtml = renderMailShell({
+          logoUrl,
+          eyebrow: "Cheque cadeau",
+          title: `Votre demande est enregistree`,
+          intro: `Bonjour ${customer.first_name}, votre demande de cheque cadeau est bien enregistree. Le cheque sera active apres validation du virement.`,
+          details: [
+            { label: "Code", value: giftCard.code },
+            { label: "Montant", value: `${Number(giftCard.amount || 0).toFixed(2)} ${giftCard.currency || "EUR"}` },
+            { label: "Reference virement", value: giftCard.payment_reference },
+            { label: "Compte", value: `${paymentDetails.bank_name || ""} ${paymentDetails.bank_account || ""}`.trim() || "A configurer" },
+          ],
+          cta: `${buildGiftCardEmailCardHtml({ giftCard, customer, publicBaseUrl })}<div style="height:14px"></div><a href="${escapeHtml(`${publicBaseUrl}/cheques-cadeaux`)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Suivre ma demande</a>`,
+          closing: paymentDetails.instructions || "Merci pour votre confiance.",
+        });
+        await transporter.sendMail({
+          from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
+          to: customer.email,
+          subject: `Just Beauty | Demande cheque cadeau recue - ${giftCard.code}`,
+          html: clientHtml,
+        });
+      },
+      async sendGiftCardValidatedEmail({ customer, giftCard, publicBaseUrl }) {
+        const clientHtml = renderMailShell({
+          logoUrl,
+          eyebrow: "Cheque cadeau",
+          title: `Demande validee - ${giftCard.code}`,
+          intro: `Bonjour ${customer.first_name}, votre demande de cheque cadeau a ete validee par Just Beauty.`,
+          details: [
+            { label: "Code", value: giftCard.code },
+            { label: "Montant", value: `${Number(giftCard.amount || 0).toFixed(2)} ${giftCard.currency || "EUR"}` },
+            { label: "Statut", value: "Validation confirmee" },
+          ],
+          cta: `${buildGiftCardEmailCardHtml({ giftCard, customer, publicBaseUrl })}<div style="height:14px"></div><a href="${escapeHtml(`${publicBaseUrl}/cheques-cadeaux`)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Voir mes cheques cadeaux</a>`,
+          closing: "Merci pour votre confiance.",
+        });
+        await transporter.sendMail({
+          from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
+          to: customer.email,
+          subject: `Just Beauty | Demande cheque cadeau validee - ${giftCard.code}`,
+          html: clientHtml,
+        });
+      },
+      async sendGiftCardActivatedEmail({ customer, giftCard, publicBaseUrl }) {
+        const clientHtml = renderMailShell({
+          logoUrl,
+          eyebrow: "Cheque cadeau actif",
+          title: `Votre cheque cadeau est actif`,
+          intro: `Bonjour ${customer.first_name}, votre cheque cadeau ${giftCard.code} est maintenant actif et utilisable.`,
+          details: [
+            { label: "Code", value: giftCard.code },
+            { label: "Montant", value: `${Number(giftCard.amount || 0).toFixed(2)} ${giftCard.currency || "EUR"}` },
+            { label: "Expire le", value: String(giftCard.expires_at || "").slice(0, 10) || "Non defini" },
+          ],
+          cta: `${buildGiftCardEmailCardHtml({ giftCard, customer, publicBaseUrl })}<div style="height:14px"></div><a href="${escapeHtml(`${publicBaseUrl}/cheques-cadeaux`)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Consulter mes cheques cadeaux</a>`,
+          closing: "Pensez a utiliser ce cheque avant son expiration.",
+        });
+        await transporter.sendMail({
+          from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
+          to: customer.email,
+          subject: `Just Beauty | Cheque cadeau actif - ${giftCard.code}`,
+          html: clientHtml,
+        });
+      },
+      async sendGiftCardBeneficiaryEmail({ senderCustomer, giftCard, publicBaseUrl }) {
+        if (!giftCard.recipient_email) return;
+        const recipientName = String(giftCard.recipient_name || "Vous");
+        const clientHtml = renderMailShell({
+          logoUrl,
+          eyebrow: "Vous avez recu un cheque cadeau",
+          title: `${recipientName}, une surprise vous attend`,
+          intro: `${senderCustomer.first_name} ${senderCustomer.last_name} vous offre un cheque cadeau Just Beauty.`,
+          details: [
+            { label: "Code", value: giftCard.code },
+            { label: "Montant", value: `${Number(giftCard.amount || 0).toFixed(2)} ${giftCard.currency || "EUR"}` },
+            { label: "Expire le", value: String(giftCard.expires_at || "").slice(0, 10) || "Non defini" },
+          ],
+          cta: `${buildGiftCardEmailCardHtml({ giftCard, customer: senderCustomer, publicBaseUrl })}<div style="height:14px"></div><a href="${escapeHtml(`${publicBaseUrl}/rendez-vous`)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Prendre rendez-vous</a>`,
+          closing: "Conservez ce code et presentez-le lors de votre reservation.",
+        });
+        await transporter.sendMail({
+          from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
+          to: giftCard.recipient_email,
+          subject: `Just Beauty | Cheque cadeau pour vous - ${giftCard.code}`,
+          html: clientHtml,
+        });
+      },
+      async sendGiftCardExpiryReminderEmail({ customer, giftCard, publicBaseUrl, daysRemaining }) {
+        const clientHtml = renderMailShell({
+          logoUrl,
+          eyebrow: "Rappel expiration",
+          title: `Votre cheque cadeau expire bientot`,
+          intro: `Bonjour ${customer.first_name}, votre cheque cadeau ${giftCard.code} arrive a expiration dans ${daysRemaining} jour(s).`,
+          details: [
+            { label: "Code", value: giftCard.code },
+            { label: "Montant", value: `${Number(giftCard.amount || 0).toFixed(2)} ${giftCard.currency || "EUR"}` },
+            { label: "Date d'expiration", value: String(giftCard.expires_at || "").slice(0, 10) || "Non definie" },
+          ],
+          cta: `${buildGiftCardEmailCardHtml({ giftCard, customer, publicBaseUrl })}<div style="height:14px"></div><a href="${escapeHtml(`${publicBaseUrl}/cheques-cadeaux`)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Voir mes cheques cadeaux</a>`,
+          closing: "N'hesitez pas a nous contacter si vous avez une question.",
+        });
+        await transporter.sendMail({
+          from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
+          to: customer.email,
+          subject: `Just Beauty | Rappel expiration cheque cadeau - ${giftCard.code}`,
           html: clientHtml,
         });
       },
@@ -1233,6 +1799,11 @@ const createMailer = async (env) => {
       sendPaymentIssueEmail: async () => {},
       sendCustomerDeletionScheduledEmail: async () => {},
       sendBookingBalancePaymentEmail: async () => {},
+      sendGiftCardRequestConfirmationEmail: async () => {},
+      sendGiftCardValidatedEmail: async () => {},
+      sendGiftCardActivatedEmail: async () => {},
+      sendGiftCardBeneficiaryEmail: async () => {},
+      sendGiftCardExpiryReminderEmail: async () => {},
     };
   }
 };
@@ -1242,9 +1813,82 @@ const createApp = async () => {
   const db = new DatabaseSync(env.DB_FILE);
   bootstrapDb(db, env);
   const mailer = await createMailer(env);
+  const telegramNotifier = createTelegramNotifier(env);
   const calDav = createCalDavClient(env);
   const publicBaseUrl = env.PUBLIC_BASE_URL.replace(/\/$/, "");
   const apiPublicBaseUrl = String(env.API_PUBLIC_BASE_URL || env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+  const protectionConfig = getProtectionConfig(env);
+  const upsertMediaProtectionAsset = db.prepare(`
+    INSERT INTO media_protection_assets (id, gallery_image_id, original_sha256, displayed_sha256, phash64, watermark_text, watermark_applied, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(gallery_image_id) DO UPDATE SET
+      original_sha256 = excluded.original_sha256,
+      displayed_sha256 = excluded.displayed_sha256,
+      phash64 = excluded.phash64,
+      watermark_text = excluded.watermark_text,
+      watermark_applied = excluded.watermark_applied
+  `);
+  const upsertContentFingerprint = db.prepare(`
+    INSERT INTO content_fingerprints (id, content_key, sha256, canary_tag, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(content_key) DO UPDATE SET
+      sha256 = excluded.sha256,
+      canary_tag = excluded.canary_tag,
+      updated_at = excluded.updated_at
+  `);
+  const insertProtectionEvent = db.prepare(`
+    INSERT INTO media_protection_events (id, asset_id, event_type, source_url, reporter, notes, evidence_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const sendBookingCreatedNotifications = async ({ booking, service, actionLinks }) => {
+    await Promise.all([
+      mailer.sendBookingCreatedEmails({ booking, service, actionLinks }),
+      telegramNotifier.sendBookingCreatedAlert({ booking, service, actionLinks }),
+    ]);
+  };
+  const refreshAllContentFingerprints = () => {
+    try {
+      const rows = db.prepare("SELECT key, value FROM site_content").all();
+      const now = new Date().toISOString();
+      rows.forEach((row) => {
+        const fingerprint = computeContentFingerprint({
+          key: row.key,
+          value: row.value,
+          secret: env.SESSION_SECRET,
+        });
+        upsertContentFingerprint.run(
+          crypto.randomUUID(),
+          row.key,
+          fingerprint.sha256,
+          `JB-${fingerprint.tag}`,
+          now,
+        );
+      });
+    } catch (error) {
+      console.warn("Content fingerprint refresh skipped:", error instanceof Error ? error.message : error);
+    }
+  };
+  const getContentWithFingerprints = () => {
+    try {
+      return db.prepare(`
+        SELECT site_content.*, content_fingerprints.canary_tag AS fingerprint_tag
+        FROM site_content
+        LEFT JOIN content_fingerprints ON content_fingerprints.content_key = site_content.key
+        ORDER BY site_content.key
+      `).all();
+    } catch {
+      return sortBy(db.prepare("SELECT * FROM site_content").all(), ["key"]);
+    }
+  };
+  const canServeProtectedUpload = (req) => {
+    if (!protectionConfig.blockHotlink) return true;
+    const origin = normalizeHost(req.headers.origin || "");
+    const referer = normalizeHost(req.headers.referer || "");
+    const sourceHost = origin || referer;
+    if (!sourceHost) return true;
+    return protectionConfig.allowedHosts.includes(sourceHost);
+  };
+  refreshAllContentFingerprints();
 
   const getWeeklySchedule = () => {
     const dayRows = sortBy(db.prepare("SELECT weekday, is_open, updated_at FROM weekly_schedule").all(), ["weekday"]);
@@ -1282,10 +1926,6 @@ const createApp = async () => {
     JOIN services ON services.id = bookings.service_id
     WHERE bookings.booking_date = ?
       AND bookings.status IN ('pending', 'confirmed')
-      AND (
-        bookings.deposit_required = 0
-        OR bookings.deposit_status IN ('not_required', 'paid', 'open', 'pending')
-      )
       ${excludeBookingId ? "AND bookings.id != ?" : ""}
   `).all(...(excludeBookingId ? [date, excludeBookingId] : [date]));
   const hasBookingConflict = (date, time, durationMinutes, excludeBookingId = null) => {
@@ -1409,6 +2049,73 @@ const createApp = async () => {
       if (Date.parse(entry.expires_at) < Date.now()) return false;
       return verifyToken(token, entry.token_hash, env.SESSION_SECRET);
     }) || null;
+  };
+  const telegramWebhookSecretToken = String(env.TELEGRAM_WEBHOOK_SECRET_TOKEN || "").trim();
+  const normalizeTelegramChatId = (value) => String(value ?? "").trim();
+  const isAdminTelegramChat = (chatId) => {
+    const adminChatId = normalizeTelegramChatId(env.TELEGRAM_CHAT_ID);
+    return Boolean(adminChatId && normalizeTelegramChatId(chatId) === adminChatId);
+  };
+  const getBookingStatusLabel = (status) => {
+    if (status === "confirmed") return "confirmee";
+    if (status === "refused") return "refusee";
+    if (status === "cancelled") return "annulee";
+    return "traitee";
+  };
+  const parseTelegramTextAction = (text) => {
+    const raw = String(text || "").trim();
+    if (!raw) return null;
+    const match = raw.match(/^\/?([a-zA-Z_]+)\s+([a-fA-F0-9-]{6,})$/);
+    if (!match) return null;
+    const command = match[1].toLowerCase();
+    const bookingId = match[2];
+    if (["confirm", "confirmer", "accept", "accepter"].includes(command)) {
+      return { action: "confirmed", bookingId };
+    }
+    if (["refuse", "refuser", "reject", "annuler", "cancel"].includes(command)) {
+      return { action: "refused", bookingId };
+    }
+    return null;
+  };
+  const parseTelegramWebhookAction = (payload) => {
+    const callbackQuery = payload?.callback_query || null;
+    const callbackData = String(callbackQuery?.data || "");
+    const callbackMatch = callbackData.match(/^booking_action:(confirmed|refused):([a-fA-F0-9-]{6,})$/);
+    if (callbackMatch) {
+      return {
+        action: callbackMatch[1],
+        bookingId: callbackMatch[2],
+        callbackQueryId: String(callbackQuery?.id || ""),
+        chatId: callbackQuery?.message?.chat?.id ?? callbackQuery?.from?.id ?? "",
+        messageId: callbackQuery?.message?.message_id ?? "",
+      };
+    }
+
+    const textAction = parseTelegramTextAction(payload?.message?.text || "");
+    if (!textAction) return null;
+    return {
+      action: textAction.action,
+      bookingId: textAction.bookingId,
+      callbackQueryId: "",
+      chatId: payload?.message?.chat?.id ?? "",
+      messageId: "",
+    };
+  };
+  const applyTelegramBookingAction = async ({ action, bookingId }) => {
+    const snapshot = getBookingWithService(bookingId);
+    if (!snapshot) {
+      return { ok: false, reason: "booking_not_found", bookingId };
+    }
+    if (snapshot.booking.status !== "pending") {
+      return {
+        ok: false,
+        reason: "already_processed",
+        bookingId,
+        status: snapshot.booking.status,
+      };
+    }
+    await updateBookingStatus(bookingId, action);
+    return { ok: true, bookingId, status: action };
   };
 
   const getBookingCalendarEvent = (bookingId) => db.prepare("SELECT * FROM booking_calendar_events WHERE booking_id = ?").get(bookingId) || null;
@@ -1738,6 +2445,199 @@ const createApp = async () => {
     })),
     ["created_at", "id"],
   ).reverse();
+  const getGiftCardPaymentDetails = () => {
+    const bankAccount = getContentValue("giftcard_bank_account", "").trim() || getContentValue("payment_bank_account", "").trim();
+    const bankName = getContentValue("giftcard_bank_name", "").trim() || getContentValue("payment_bank_name", "Just Beauty").trim();
+    const instructions = getContentValue(
+      "giftcard_transfer_instructions",
+      "Veuillez indiquer la reference du cheque cadeau dans la communication du virement.",
+    ).trim();
+    return {
+      bank_account: bankAccount,
+      bank_name: bankName,
+      instructions,
+    };
+  };
+  const sanitizeGiftCardStatus = (value) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized === "active") return "active";
+    if (normalized === "refused") return "refused";
+    if (normalized === "used") return "used";
+    if (normalized === "expired") return "expired";
+    return "pending_payment";
+  };
+  const buildGiftCardCode = () => `JBGC-${crypto.randomUUID().replace(/-/g, "").slice(0, 10).toUpperCase()}`;
+  const serializeGiftCardRow = (row) => ({
+    id: row.id,
+    customer_id: row.customer_id,
+    code: row.code,
+    amount: Number(row.amount || 0),
+    currency: row.currency || "EUR",
+    recipient_name: row.recipient_name || "",
+    recipient_email: row.recipient_email || "",
+    message: row.message || "",
+    theme_style: normalizeGiftCardTheme(row.theme_style || "glam_chic"),
+    payment_method: row.payment_method || "bank_transfer",
+    payment_reference: row.payment_reference || "",
+    bank_account_snapshot: row.bank_account_snapshot || "",
+    bank_name_snapshot: row.bank_name_snapshot || "",
+    status: sanitizeGiftCardStatus(row.status),
+    admin_note: row.admin_note || "",
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    validated_at: row.validated_at || "",
+    expires_at: row.expires_at || "",
+    used_at: row.used_at || "",
+    expiration_reminder_sent_at: row.expiration_reminder_sent_at || "",
+  });
+  const refreshExpiredGiftCards = () => {
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE gift_cards
+      SET status = 'expired', updated_at = ?
+      WHERE status = 'active' AND expires_at != '' AND expires_at <= ?
+    `).run(now, now);
+  };
+  const getCustomerGiftCards = (customerId) => {
+    refreshExpiredGiftCards();
+    return db.prepare("SELECT * FROM gift_cards WHERE customer_id = ? ORDER BY created_at DESC").all(customerId).map(serializeGiftCardRow);
+  };
+  const createCustomerGiftCard = ({ customerId, amount, recipientName, recipientEmail, message, themeStyle }) => {
+    const normalizedAmount = Number(amount || 0);
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+      throw new Error("Montant invalide");
+    }
+    const payment = getGiftCardPaymentDetails();
+    if (!payment.bank_account) {
+      throw new Error("Le numero de compte cheque cadeau n'est pas configure");
+    }
+    const now = new Date().toISOString();
+    const code = buildGiftCardCode();
+    const id = crypto.randomUUID();
+    const paymentReference = `CADEAU-${id.slice(0, 8).toUpperCase()}`;
+    const normalizedThemeStyle = normalizeGiftCardTheme(themeStyle);
+    db.prepare(`
+      INSERT INTO gift_cards (
+        id, customer_id, code, amount, currency, recipient_name, recipient_email, message, theme_style,
+        payment_method, payment_reference, bank_account_snapshot, bank_name_snapshot,
+        status, admin_note, created_at, updated_at, validated_at, expires_at, used_at, expiration_reminder_sent_at
+      ) VALUES (?, ?, ?, ?, 'EUR', ?, ?, ?, ?, 'bank_transfer', ?, ?, ?, 'pending_payment', '', ?, ?, '', '', '', '')
+    `).run(
+      id,
+      customerId,
+      code,
+      Number(normalizedAmount.toFixed(2)),
+      String(recipientName || "").trim(),
+      String(recipientEmail || "").trim().toLowerCase(),
+      String(message || "").trim(),
+      normalizedThemeStyle,
+      paymentReference,
+      payment.bank_account,
+      payment.bank_name,
+      now,
+      now,
+    );
+    return serializeGiftCardRow(db.prepare("SELECT * FROM gift_cards WHERE id = ?").get(id));
+  };
+  const getAdminGiftCards = () => {
+    refreshExpiredGiftCards();
+    return db.prepare(`
+      SELECT gift_cards.*, customers.first_name AS customer_first_name, customers.last_name AS customer_last_name, customers.email AS customer_email
+      FROM gift_cards
+      JOIN customers ON customers.id = gift_cards.customer_id
+      ORDER BY gift_cards.created_at DESC
+    `).all().map((row) => ({
+      ...serializeGiftCardRow(row),
+      customer_name: `${row.customer_first_name || ""} ${row.customer_last_name || ""}`.trim(),
+      customer_email: row.customer_email || "",
+    }));
+  };
+  const getGiftCardWithCustomer = (giftCardId) => db.prepare(`
+    SELECT gift_cards.*, customers.first_name AS customer_first_name, customers.last_name AS customer_last_name, customers.email AS customer_email
+    FROM gift_cards
+    JOIN customers ON customers.id = gift_cards.customer_id
+    WHERE gift_cards.id = ?
+  `).get(giftCardId);
+  const updateGiftCardStatus = (giftCardId, status, adminNote = "") => {
+    const existing = db.prepare("SELECT * FROM gift_cards WHERE id = ?").get(giftCardId);
+    if (!existing) return null;
+    refreshExpiredGiftCards();
+    const fresh = db.prepare("SELECT * FROM gift_cards WHERE id = ?").get(giftCardId);
+    const currentStatus = sanitizeGiftCardStatus(fresh.status);
+    const target = sanitizeGiftCardStatus(status);
+    if (currentStatus === "expired" && target !== "expired") {
+      throw new Error("Cheque cadeau expire: statut non modifiable");
+    }
+    const now = new Date();
+    const nowIso = now.toISOString();
+    let validatedAt = fresh.validated_at || "";
+    let expiresAt = fresh.expires_at || "";
+    let usedAt = fresh.used_at || "";
+    if (target === "active") {
+      validatedAt = nowIso;
+      expiresAt = new Date(now.getTime() + 1000 * 60 * 60 * 24 * 365).toISOString();
+      usedAt = "";
+    } else if (target === "used") {
+      if (currentStatus !== "active") {
+        throw new Error("Un cheque cadeau doit etre actif avant d'etre marque comme utilise");
+      }
+      usedAt = nowIso;
+      if (!expiresAt) {
+        expiresAt = new Date(now.getTime() + 1000 * 60 * 60 * 24 * 365).toISOString();
+      }
+      if (!validatedAt) validatedAt = nowIso;
+    } else if (target === "refused" || target === "pending_payment") {
+      validatedAt = "";
+      expiresAt = "";
+      usedAt = "";
+    }
+    db.prepare(`
+      UPDATE gift_cards
+      SET status = ?, admin_note = ?, updated_at = ?, validated_at = ?, expires_at = ?, used_at = ?, expiration_reminder_sent_at = ?
+      WHERE id = ?
+    `).run(target, String(adminNote || "").trim(), nowIso, validatedAt, expiresAt, usedAt, "", giftCardId);
+    return {
+      previous_status: currentStatus,
+      card: serializeGiftCardRow(db.prepare("SELECT * FROM gift_cards WHERE id = ?").get(giftCardId)),
+    };
+  };
+  const processGiftCardExpiryReminders = async () => {
+    const now = Date.now();
+    const limitDate = new Date(now + (1000 * 60 * 60 * 24 * 30)).toISOString();
+    const rows = db.prepare(`
+      SELECT gift_cards.*, customers.first_name AS customer_first_name, customers.last_name AS customer_last_name, customers.email AS customer_email
+      FROM gift_cards
+      JOIN customers ON customers.id = gift_cards.customer_id
+      WHERE gift_cards.status = 'active'
+        AND gift_cards.expires_at != ''
+        AND gift_cards.expires_at > ?
+        AND gift_cards.expires_at <= ?
+        AND gift_cards.expiration_reminder_sent_at = ''
+      ORDER BY gift_cards.expires_at ASC
+      LIMIT 20
+    `).all(new Date(now).toISOString(), limitDate);
+
+    for (const row of rows) {
+      const expiresAt = Date.parse(row.expires_at || "");
+      const daysRemaining = Math.max(1, Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24)));
+      try {
+        await mailer.sendGiftCardExpiryReminderEmail({
+          customer: {
+            first_name: row.customer_first_name || "",
+            last_name: row.customer_last_name || "",
+            email: row.customer_email || "",
+          },
+          giftCard: serializeGiftCardRow(row),
+          publicBaseUrl,
+          daysRemaining,
+        });
+        db.prepare("UPDATE gift_cards SET expiration_reminder_sent_at = ?, updated_at = ? WHERE id = ?")
+          .run(new Date().toISOString(), new Date().toISOString(), row.id);
+      } catch (error) {
+        console.warn("Gift card expiry reminder failed:", error instanceof Error ? error.message : error);
+      }
+    }
+  };
   const deleteBookingLoyaltyTransactions = (bookingId) => {
     db.prepare("DELETE FROM loyalty_transactions WHERE booking_id = ?").run(bookingId);
   };
@@ -2074,9 +2974,9 @@ const createApp = async () => {
 
     try {
       const actionLinks = createBookingActionLinks(updated.booking.id);
-      await mailer.sendBookingCreatedEmails({ booking: updated.booking, service: updated.service, actionLinks });
+      await sendBookingCreatedNotifications({ booking: updated.booking, service: updated.service, actionLinks });
     } catch (error) {
-      console.warn("Booking activation email failed:", error instanceof Error ? error.message : error);
+      console.warn("Booking activation notification failed:", error instanceof Error ? error.message : error);
     }
 
     return updated;
@@ -2123,12 +3023,18 @@ const createApp = async () => {
 
     try {
       await purgeScheduledCustomerDeletions();
+      refreshExpiredGiftCards();
+      await processGiftCardExpiryReminders();
       if (req.method === "OPTIONS") {
         send.empty(res);
         return;
       }
 
       if (pathname.startsWith("/uploads/")) {
+        if (!canServeProtectedUpload(req)) {
+          send.json(res, 403, { error: "Hotlink non autorise" });
+          return;
+        }
         const relative = decodeURIComponent(pathname.replace("/uploads/", ""));
         const safePath = path.normalize(relative).replace(/^(\.\.[/\\])+/, "");
         const filePath = path.join(UPLOAD_DIR, safePath);
@@ -2138,7 +3044,18 @@ const createApp = async () => {
         }
         try {
           await fs.access(filePath);
-          send.file(res, filePath);
+          const relativeUrl = `/uploads/${safePath.replace(/\\/g, "/")}`;
+          const protectionAsset = db.prepare(`
+            SELECT media_protection_assets.displayed_sha256
+            FROM media_protection_assets
+            JOIN gallery_images ON gallery_images.id = media_protection_assets.gallery_image_id
+            WHERE gallery_images.url = ?
+          `).get(relativeUrl);
+          send.file(res, filePath, {
+            "Content-Disposition": "inline",
+            "X-Content-Source": "justbeauty-gallery",
+            ...(protectionAsset?.displayed_sha256 ? { "X-Asset-Fingerprint": protectionAsset.displayed_sha256 } : {}),
+          });
         } catch {
           send.json(res, 404, { error: "File not found" });
         }
@@ -2147,6 +3064,87 @@ const createApp = async () => {
 
       if (pathname === "/api/health" && req.method === "GET") {
         send.json(res, 200, { ok: true });
+        return;
+      }
+
+      if (pathname === "/api/telegram/webhook" && req.method === "POST") {
+        const providedSecret = String(req.headers["x-telegram-bot-api-secret-token"] || "").trim();
+        if (telegramWebhookSecretToken && providedSecret !== telegramWebhookSecretToken) {
+          send.json(res, 403, { error: "Forbidden" });
+          return;
+        }
+
+        const payload = await readBody(req);
+        const actionPayload = parseTelegramWebhookAction(payload);
+        if (!actionPayload) {
+          send.json(res, 200, { ok: true, ignored: true });
+          return;
+        }
+
+        if (!isAdminTelegramChat(actionPayload.chatId)) {
+          if (actionPayload.callbackQueryId) {
+            try {
+              await telegramNotifier.answerCallbackQuery({
+                callbackQueryId: actionPayload.callbackQueryId,
+                text: "Action non autorisee",
+                showAlert: true,
+              });
+            } catch (error) {
+              console.warn("Telegram callback answer failed:", error instanceof Error ? error.message : error);
+            }
+          }
+          send.json(res, 200, { ok: true, ignored: true });
+          return;
+        }
+
+        const result = await applyTelegramBookingAction(actionPayload);
+        const callbackText = result.ok
+          ? "Action recue et effectuee"
+          : result.reason === "already_processed"
+            ? `Deja ${getBookingStatusLabel(result.status)}`
+            : "Reservation introuvable";
+
+        if (actionPayload.callbackQueryId) {
+          try {
+            await telegramNotifier.answerCallbackQuery({
+              callbackQueryId: actionPayload.callbackQueryId,
+              text: callbackText,
+              showAlert: !result.ok,
+            });
+          } catch (error) {
+            console.warn("Telegram callback answer failed:", error instanceof Error ? error.message : error);
+          }
+
+          if (result.ok || result.reason === "already_processed") {
+            try {
+              await telegramNotifier.clearInlineKeyboard({
+                chatId: actionPayload.chatId,
+                messageId: actionPayload.messageId,
+              });
+            } catch (error) {
+              console.warn("Telegram keyboard cleanup failed:", error instanceof Error ? error.message : error);
+            }
+          }
+        }
+
+        try {
+          await telegramNotifier.sendActionResult({
+            chatId: actionPayload.chatId,
+            bookingId: result.bookingId || actionPayload.bookingId,
+            action: actionPayload.action,
+            status: result.status || "",
+            success: Boolean(result.ok),
+            reason: result.reason === "already_processed"
+              ? "deja traitee"
+              : result.reason === "booking_not_found"
+                ? "introuvable"
+                : "",
+          });
+        } catch (error) {
+          console.warn("Telegram action result message failed:", error instanceof Error ? error.message : error);
+        }
+
+        send.json(res, 200, { ok: true, applied: result.ok });
         return;
       }
 
@@ -2495,6 +3493,7 @@ const createApp = async () => {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
         `);
         Object.entries(values).forEach(([key, value]) => upsert.run(crypto.randomUUID(), key, value, now));
+        refreshAllContentFingerprints();
         send.json(res, 200, getPaymentSettings({ includeSecrets: true }));
         return;
       }
@@ -2650,7 +3649,42 @@ const createApp = async () => {
           user: customer,
           bookings: getCustomerBookings(customer.id),
           loyaltyTransactions: getCustomerLoyaltyTransactions(customer.id),
+          giftCards: getCustomerGiftCards(customer.id),
+          giftCardPaymentDetails: getGiftCardPaymentDetails(),
         });
+        return;
+      }
+
+      if (pathname === "/api/customers/gift-cards" && req.method === "POST") {
+        const customer = requireCustomer(req, res);
+        if (!customer) return;
+        const body = await readBody(req);
+        try {
+          const card = createCustomerGiftCard({
+            customerId: customer.id,
+            amount: body.amount,
+            recipientName: body.recipient_name,
+            recipientEmail: body.recipient_email,
+            message: body.message,
+            themeStyle: body.theme_style,
+          });
+          try {
+            await mailer.sendGiftCardRequestConfirmationEmail({
+              customer,
+              giftCard: card,
+              paymentDetails: getGiftCardPaymentDetails(),
+              publicBaseUrl,
+            });
+          } catch (error) {
+            console.warn("Gift card request confirmation email failed:", error instanceof Error ? error.message : error);
+          }
+          send.json(res, 201, {
+            gift_card: card,
+            payment_details: getGiftCardPaymentDetails(),
+          });
+        } catch (error) {
+          send.json(res, 400, { error: error instanceof Error ? error.message : "Impossible de creer le cheque cadeau" });
+        }
         return;
       }
 
@@ -2692,6 +3726,37 @@ const createApp = async () => {
 
       if (pathname === "/api/availability" && req.method === "GET") {
         send.json(res, 200, getAvailabilityOverrides());
+        return;
+      }
+
+      if (pathname === "/api/availability/slots" && req.method === "GET") {
+        const date = normalizeDate(url.searchParams.get("date") || "");
+        const serviceId = String(url.searchParams.get("service_id") || "").trim();
+        if (!date || !serviceId) {
+          send.json(res, 400, { error: "Parametres date et service_id obligatoires" });
+          return;
+        }
+
+        const service = db.prepare("SELECT id, duration_minutes FROM services WHERE id = ? AND is_active = 1").get(serviceId);
+        if (!service) {
+          send.json(res, 404, { error: "Service introuvable" });
+          return;
+        }
+
+        if (!isDateAvailable(date)) {
+          send.json(res, 200, { date, service_id: serviceId, slots: [], has_available: false });
+          return;
+        }
+
+        const slots = APPOINTMENT_TIME_SLOTS.filter((slot) =>
+          isTimeSlotAvailable(date, slot, Number(service.duration_minutes || DEFAULT_SERVICE_DURATION_MINUTES)));
+
+        send.json(res, 200, {
+          date,
+          service_id: serviceId,
+          slots,
+          has_available: slots.length > 0,
+        });
         return;
       }
 
@@ -2927,9 +3992,9 @@ const createApp = async () => {
         } else if (!depositRequired) {
           try {
             const actionLinks = createBookingActionLinks(booking.id);
-            await mailer.sendBookingCreatedEmails({ booking, service, actionLinks });
+            await sendBookingCreatedNotifications({ booking, service, actionLinks });
           } catch (error) {
-            console.warn("Booking email failed:", error instanceof Error ? error.message : error);
+            console.warn("Booking notification failed:", error instanceof Error ? error.message : error);
           }
         }
 
@@ -2949,7 +4014,7 @@ const createApp = async () => {
       }
 
       if (pathname === "/api/content" && req.method === "GET") {
-        send.json(res, 200, sortBy(db.prepare("SELECT * FROM site_content").all(), ["key"]));
+        send.json(res, 200, getContentWithFingerprints());
         return;
       }
 
@@ -3069,6 +4134,59 @@ const createApp = async () => {
       if (pathname === "/api/admin/customers" && req.method === "GET") {
         if (!requireAdmin(req, res)) return;
         send.json(res, 200, getAdminCustomers());
+        return;
+      }
+
+      if (pathname === "/api/admin/gift-cards" && req.method === "GET") {
+        if (!requireAdmin(req, res)) return;
+        send.json(res, 200, getAdminGiftCards());
+        return;
+      }
+
+      if (pathname.match(/^\/api\/admin\/gift-cards\/[^/]+$/) && req.method === "PATCH") {
+        if (!requireAdmin(req, res)) return;
+        const id = pathname.split("/")[4];
+        const body = await readBody(req);
+        try {
+          const updated = updateGiftCardStatus(id, body.status, body.admin_note);
+          if (!updated?.card) {
+            send.json(res, 404, { error: "Cheque cadeau introuvable" });
+            return;
+          }
+          if (updated.card.status === "active" && updated.previous_status !== "active") {
+            const cardWithCustomer = getGiftCardWithCustomer(id);
+            if (cardWithCustomer?.customer_email) {
+              const customerPayload = {
+                first_name: cardWithCustomer.customer_first_name || "",
+                last_name: cardWithCustomer.customer_last_name || "",
+                email: cardWithCustomer.customer_email || "",
+              };
+              const cardPayload = serializeGiftCardRow(cardWithCustomer);
+              try {
+                await mailer.sendGiftCardValidatedEmail({
+                  customer: customerPayload,
+                  giftCard: cardPayload,
+                  publicBaseUrl,
+                });
+                await mailer.sendGiftCardActivatedEmail({
+                  customer: customerPayload,
+                  giftCard: cardPayload,
+                  publicBaseUrl,
+                });
+                await mailer.sendGiftCardBeneficiaryEmail({
+                  senderCustomer: customerPayload,
+                  giftCard: cardPayload,
+                  publicBaseUrl,
+                });
+              } catch (error) {
+                console.warn("Gift card activation emails failed:", error instanceof Error ? error.message : error);
+              }
+            }
+          }
+          send.json(res, 200, updated.card);
+        } catch (error) {
+          send.json(res, 400, { error: error instanceof Error ? error.message : "Impossible de mettre a jour le cheque cadeau" });
+        }
         return;
       }
 
@@ -3199,7 +4317,7 @@ const createApp = async () => {
           send.json(res, 404, { error: "Booking not found" });
           return;
         }
-        const shouldDeleteLoyalty = shouldRevokeBookingLoyalty(existing);
+        const shouldSendCancellationEmail = shouldRevokeBookingLoyalty(existing);
 
         try {
           await syncBookingCalendar({ ...existing, booking: { ...existing.booking, status: "cancelled" } });
@@ -3208,10 +4326,8 @@ const createApp = async () => {
         }
 
         db.prepare("DELETE FROM bookings WHERE id = ?").run(id);
-        if (shouldDeleteLoyalty) {
-          deleteBookingLoyaltyTransactions(id);
-        }
-        if (shouldDeleteLoyalty) {
+        deleteBookingLoyaltyTransactions(id);
+        if (shouldSendCancellationEmail) {
           try {
             await mailer.sendBookingStatusEmail({
               booking: { ...existing.booking, status: "cancelled" },
@@ -3237,15 +4353,19 @@ const createApp = async () => {
       if (pathname === "/api/admin/gallery" && req.method === "POST") {
         if (!requireAdmin(req, res)) return;
         const body = await readBody(req);
-        const match = String(body.dataUrl || "").match(/^data:(.+);base64,(.+)$/);
-        if (!match) {
+        if (!mimeFromDataUrl(body.dataUrl)) {
           send.json(res, 400, { error: "Invalid image payload" });
           return;
         }
-        const extension = sanitizeFilename((body.filename || "image.png").split(".").pop() || "png");
+        const protectedImage = await buildImageProtectionRecord({
+          dataUrl: body.dataUrl,
+          filename: String(body.filename || "image.png"),
+          protectionConfig,
+        });
+        const extension = sanitizeFilename(protectedImage.extension || "png");
         const filename = `${Date.now()}-${crypto.randomUUID()}.${extension}`;
         const filePath = path.join(UPLOAD_DIR, filename);
-        await fs.writeFile(filePath, Buffer.from(match[2], "base64"));
+        await fs.writeFile(filePath, protectedImage.outputBuffer);
         const image = {
           id: crypto.randomUUID(),
           url: `/uploads/${filename}`,
@@ -3255,6 +4375,16 @@ const createApp = async () => {
         };
         db.prepare("INSERT INTO gallery_images (id, url, alt_text, sort_order, created_at) VALUES (?, ?, ?, ?, ?)")
           .run(image.id, image.url, image.alt_text, image.sort_order, image.created_at);
+        upsertMediaProtectionAsset.run(
+          crypto.randomUUID(),
+          image.id,
+          protectedImage.originalSha256,
+          protectedImage.displayedSha256,
+          protectedImage.phash64 || "",
+          protectionConfig.watermarkText,
+          protectedImage.watermarkApplied,
+          image.created_at,
+        );
         send.json(res, 201, image);
         return;
       }
@@ -3289,14 +4419,232 @@ const createApp = async () => {
             // Ignore missing files.
           }
         }
+        db.prepare("DELETE FROM media_protection_assets WHERE gallery_image_id = ?").run(id);
         db.prepare("DELETE FROM gallery_images WHERE id = ?").run(id);
         send.empty(res);
         return;
       }
 
+      if (pathname === "/api/admin/protection/config" && req.method === "GET") {
+        if (!requireAdmin(req, res)) return;
+        send.json(res, 200, {
+          enabled: protectionConfig.enabled,
+          block_hotlink: protectionConfig.blockHotlink,
+          allowed_hosts: protectionConfig.allowedHosts,
+          watermark_text: protectionConfig.watermarkText,
+          watermark_opacity: protectionConfig.watermarkOpacity,
+          report_email: protectionConfig.reportEmail,
+        });
+        return;
+      }
+
+      if (pathname === "/api/admin/protection/assets" && req.method === "GET") {
+        if (!requireAdmin(req, res)) return;
+        const rows = db.prepare(`
+          SELECT
+            media_protection_assets.*,
+            gallery_images.url AS image_url,
+            gallery_images.alt_text AS image_alt_text,
+            gallery_images.created_at AS image_created_at
+          FROM media_protection_assets
+          JOIN gallery_images ON gallery_images.id = media_protection_assets.gallery_image_id
+          ORDER BY media_protection_assets.created_at DESC
+        `).all();
+        send.json(res, 200, rows);
+        return;
+      }
+
+      if (pathname === "/api/admin/protection/events" && req.method === "GET") {
+        if (!requireAdmin(req, res)) return;
+        const rows = db.prepare(`
+          SELECT media_protection_events.*, media_protection_assets.gallery_image_id
+          FROM media_protection_events
+          LEFT JOIN media_protection_assets ON media_protection_assets.id = media_protection_events.asset_id
+          ORDER BY media_protection_events.created_at DESC
+          LIMIT 200
+        `).all().map((row) => ({
+          ...row,
+          evidence: (() => {
+            try {
+              return JSON.parse(row.evidence_json || "{}");
+            } catch {
+              return {};
+            }
+          })(),
+        }));
+        send.json(res, 200, rows);
+        return;
+      }
+
+      if (pathname === "/api/admin/protection/verify" && req.method === "POST") {
+        if (!requireAdmin(req, res)) return;
+        const body = await readBody(req);
+        let candidateSha256 = String(body.sha256 || "").trim().toLowerCase();
+        let candidatePHash = String(body.phash64 || "").trim().toLowerCase();
+        const imageUrl = String(body.image_url || "").trim();
+        const hasDataUrl = Boolean(String(body.dataUrl || "").trim());
+
+        if (hasDataUrl) {
+          const parsed = mimeFromDataUrl(body.dataUrl);
+          if (!parsed) {
+            send.json(res, 400, { error: "Image payload invalide" });
+            return;
+          }
+          const buffer = Buffer.from(parsed.base64, "base64");
+          candidateSha256 = hashSha256(buffer);
+          if (isRasterImageMimeType(parsed.mimeType)) {
+            candidatePHash = await computeDHash64(buffer);
+          }
+        } else if (imageUrl) {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 8000);
+          try {
+            const response = await fetch(imageUrl, { signal: controller.signal });
+            if (!response.ok) {
+              send.json(res, 400, { error: `Impossible de recuperer l'image (${response.status})` });
+              return;
+            }
+            const buffer = Buffer.from(await response.arrayBuffer());
+            candidateSha256 = hashSha256(buffer);
+            const contentType = String(response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+            if (isRasterImageMimeType(contentType)) {
+              candidatePHash = await computeDHash64(buffer);
+            }
+          } catch (error) {
+            send.json(res, 400, { error: error instanceof Error ? error.message : "Verification distante impossible" });
+            return;
+          } finally {
+            clearTimeout(timeout);
+          }
+        }
+
+        if (!candidateSha256 && !candidatePHash) {
+          send.json(res, 400, { error: "Fournissez dataUrl, image_url, sha256 ou phash64" });
+          return;
+        }
+
+        const assets = db.prepare(`
+          SELECT
+            media_protection_assets.*,
+            gallery_images.url AS image_url,
+            gallery_images.alt_text AS image_alt_text
+          FROM media_protection_assets
+          JOIN gallery_images ON gallery_images.id = media_protection_assets.gallery_image_id
+        `).all();
+
+        const exactMatches = assets.filter((asset) =>
+          (candidateSha256 && (asset.displayed_sha256 === candidateSha256 || asset.original_sha256 === candidateSha256))
+          || (candidatePHash && asset.phash64 === candidatePHash));
+
+        const nearMatches = candidatePHash
+          ? assets
+            .filter((asset) => asset.phash64)
+            .map((asset) => ({ ...asset, phash_distance: hammingDistanceHex64(candidatePHash, asset.phash64) }))
+            .filter((asset) => Number.isFinite(asset.phash_distance) && asset.phash_distance <= 12)
+            .sort((a, b) => a.phash_distance - b.phash_distance)
+            .slice(0, 10)
+          : [];
+
+        insertProtectionEvent.run(
+          crypto.randomUUID(),
+          exactMatches[0]?.id || nearMatches[0]?.id || null,
+          "verify_attempt",
+          imageUrl,
+          "admin",
+          exactMatches.length > 0 ? "exact_match" : nearMatches.length > 0 ? "near_match" : "no_match",
+          JSON.stringify({
+            candidateSha256,
+            candidatePHash,
+            exactCount: exactMatches.length,
+            nearCount: nearMatches.length,
+          }),
+          new Date().toISOString(),
+        );
+
+        send.json(res, 200, {
+          matched: exactMatches.length > 0 || nearMatches.length > 0,
+          exact_matches: exactMatches,
+          near_matches: nearMatches,
+          candidate: {
+            sha256: candidateSha256,
+            phash64: candidatePHash,
+          },
+        });
+        return;
+      }
+
+      if (pathname === "/api/admin/protection/report" && req.method === "POST") {
+        if (!requireAdmin(req, res)) return;
+        const body = await readBody(req);
+        const assetId = String(body.asset_id || "").trim() || null;
+        const sourceUrl = String(body.source_url || "").trim();
+        const reporter = String(body.reporter || "admin").trim();
+        const notes = String(body.notes || "").trim();
+        const eventType = String(body.event_type || "infringement_report").trim();
+        const evidence = body.evidence && typeof body.evidence === "object" ? body.evidence : {};
+        insertProtectionEvent.run(
+          crypto.randomUUID(),
+          assetId,
+          eventType,
+          sourceUrl,
+          reporter,
+          notes,
+          JSON.stringify(evidence),
+          new Date().toISOString(),
+        );
+        send.json(res, 201, { ok: true });
+        return;
+      }
+
+      if (pathname === "/api/admin/protection/dmca-template" && req.method === "GET") {
+        if (!requireAdmin(req, res)) return;
+        const assetId = String(url.searchParams.get("asset_id") || "").trim();
+        const sourceUrl = String(url.searchParams.get("source_url") || "").trim();
+        const row = assetId
+          ? db.prepare(`
+            SELECT media_protection_assets.*, gallery_images.url AS image_url, gallery_images.alt_text
+            FROM media_protection_assets
+            JOIN gallery_images ON gallery_images.id = media_protection_assets.gallery_image_id
+            WHERE media_protection_assets.id = ?
+          `).get(assetId)
+          : null;
+
+        const nowIso = new Date().toISOString();
+        const dmcaText = [
+          "Subject: Unauthorized use of copyrighted content - Just Beauty",
+          "",
+          `Date: ${nowIso}`,
+          "Rights holder: Just Beauty",
+          `Contact: ${protectionConfig.reportEmail || env.BOOKING_ADMIN_EMAIL || env.ADMIN_EMAIL}`,
+          "",
+          "I am the rights holder (or authorized agent) for the content listed below.",
+          "",
+          `Original work URL: ${row?.image_url ? `${publicBaseUrl}${row.image_url}` : publicBaseUrl}`,
+          row?.displayed_sha256 ? `Fingerprint (SHA-256): ${row.displayed_sha256}` : "",
+          row?.phash64 ? `Perceptual hash (dHash64): ${row.phash64}` : "",
+          sourceUrl ? `Infringing URL: ${sourceUrl}` : "Infringing URL: <to complete>",
+          "",
+          "I have a good-faith belief that this use is not authorized by the copyright owner, its agent, or the law.",
+          "The information in this notice is accurate, and under penalty of perjury, I am authorized to act on behalf of the owner.",
+          "",
+          "Requested action: remove or disable access to the infringing content promptly.",
+          "",
+          "Signature:",
+          "Just Beauty",
+        ].filter(Boolean).join("\n");
+
+        send.json(res, 200, {
+          generated_at: nowIso,
+          asset: row || null,
+          source_url: sourceUrl,
+          template: dmcaText,
+        });
+        return;
+      }
+
       if (pathname === "/api/admin/content" && req.method === "GET") {
         if (!requireAdmin(req, res)) return;
-        send.json(res, 200, sortBy(db.prepare("SELECT * FROM site_content").all(), ["key"]));
+        send.json(res, 200, getContentWithFingerprints());
         return;
       }
 
@@ -3311,7 +4659,8 @@ const createApp = async () => {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
         `);
         entries.forEach(([key, value]) => upsert.run(crypto.randomUUID(), key, String(value), now));
-        send.json(res, 200, sortBy(db.prepare("SELECT * FROM site_content").all(), ["key"]));
+        refreshAllContentFingerprints();
+        send.json(res, 200, getContentWithFingerprints());
         return;
       }
 

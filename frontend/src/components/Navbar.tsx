@@ -13,6 +13,7 @@ const links = [
   { to: "/galerie", label: "Galerie" },
   { to: "/contact", label: "Contact" },
   { to: "/rendez-vous", label: "Rendez-vous" },
+  { to: "/cheques-cadeaux", label: "Cheques cadeaux" },
 ];
 
 const Navbar = () => {

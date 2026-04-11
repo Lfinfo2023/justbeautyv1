@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { format } from "date-fns";
 import { fr } from "date-fns/locale";
 import { useClientAuth } from "@/hooks/useClientAuth";
@@ -11,6 +11,8 @@ import { toast } from "sonner";
 
 const Account = () => {
   const { customer, bookings, loyaltyTransactions, loading, signIn, signUp, signOut, deleteAccount } = useClientAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -24,6 +26,8 @@ const Account = () => {
   });
   const [privacyAccepted, setPrivacyAccepted] = useState(false);
   const [error, setError] = useState("");
+  const redirectTargetRaw = new URLSearchParams(location.search).get("redirect");
+  const redirectTarget = redirectTargetRaw && redirectTargetRaw.startsWith("/") ? redirectTargetRaw : "/compte";
 
   if (loading) {
     return (
@@ -140,6 +144,7 @@ const Account = () => {
                 </div>
               </AnimatedSection>
             </div>
+
           </div>
         </section>
       </main>
@@ -186,7 +191,12 @@ const Account = () => {
                   onSubmit={async (event) => {
                     event.preventDefault();
                     const result = await signIn(loginEmail, loginPassword);
-                    setError(result.error?.message || "");
+                    if (result.error) {
+                      setError(result.error.message || "");
+                      return;
+                    }
+                    setError("");
+                    navigate(redirectTarget, { replace: true });
                   }}
                 >
                   <Input
@@ -217,7 +227,12 @@ const Account = () => {
                       return;
                     }
                     const result = await signUp(registerForm);
-                    setError(result.error?.message || "");
+                    if (result.error) {
+                      setError(result.error.message || "");
+                      return;
+                    }
+                    setError("");
+                    navigate(redirectTarget, { replace: true });
                   }}
                 >
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

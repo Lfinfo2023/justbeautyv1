@@ -123,10 +123,43 @@ export interface LoyaltySummary {
   next_discount_at: number;
 }
 
+export type GiftCardStatus = "pending_payment" | "active" | "refused" | "used" | "expired";
+
+export interface GiftCard {
+  id: string;
+  customer_id: string;
+  code: string;
+  amount: number;
+  currency: string;
+  recipient_name: string;
+  recipient_email: string;
+  message: string;
+  theme_style: "fun_party" | "fun_pop" | "glam_chic" | "glam_luxe";
+  payment_method: "bank_transfer";
+  payment_reference: string;
+  bank_account_snapshot: string;
+  bank_name_snapshot: string;
+  status: GiftCardStatus;
+  admin_note: string;
+  created_at: string;
+  updated_at: string;
+  validated_at: string;
+  expires_at: string;
+  used_at: string;
+}
+
+export interface GiftCardPaymentDetails {
+  bank_account: string;
+  bank_name: string;
+  instructions: string;
+}
+
 export interface CustomerDashboardResponse {
   user: CustomerUser;
   bookings: Booking[];
   loyaltyTransactions: LoyaltyTransaction[];
+  giftCards: GiftCard[];
+  giftCardPaymentDetails: GiftCardPaymentDetails;
 }
 
 export interface CalDavStatus {
@@ -183,11 +216,57 @@ export interface GalleryImage {
   created_at: string;
 }
 
+export interface ProtectionAsset {
+  id: string;
+  gallery_image_id: string;
+  original_sha256: string;
+  displayed_sha256: string;
+  phash64: string;
+  watermark_text: string;
+  watermark_applied: number;
+  created_at: string;
+  image_url: string;
+  image_alt_text: string;
+}
+
+export interface ProtectionEvent {
+  id: string;
+  asset_id?: string | null;
+  gallery_image_id?: string | null;
+  event_type: string;
+  source_url: string;
+  reporter: string;
+  notes: string;
+  evidence_json?: string;
+  evidence?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ProtectionConfig {
+  enabled: boolean;
+  block_hotlink: boolean;
+  allowed_hosts: string[];
+  watermark_text: string;
+  watermark_opacity: number;
+  report_email: string;
+}
+
+export interface ProtectionVerifyResponse {
+  matched: boolean;
+  exact_matches: ProtectionAsset[];
+  near_matches: Array<ProtectionAsset & { phash_distance: number }>;
+  candidate: {
+    sha256: string;
+    phash64: string;
+  };
+}
+
 export interface SiteContentItem {
   id: string;
   key: string;
   value: string;
   updated_at: string;
+  fingerprint_tag?: string;
 }
 
 export interface AvailabilityOverride {
@@ -208,6 +287,13 @@ export interface AvailabilityResponse {
   days: AvailabilityOverride[];
   slots: AvailabilitySlotOverride[];
   timeSlots: string[];
+}
+
+export interface AvailabilitySlotsResponse {
+  date: string;
+  service_id: string;
+  slots: string[];
+  has_available: boolean;
 }
 
 export interface WeeklyScheduleRange {
@@ -307,6 +393,12 @@ export const api = {
     me: () => request<CustomerDashboardResponse>("/api/customers/me", { customerAuth: true }),
     deleteAccount: () => request<{ ok: true; customer?: CustomerUser }>("/api/customers/delete", { method: "POST", customerAuth: true }),
     logout: () => request<void>("/api/customers/logout", { method: "POST", customerAuth: true }),
+    createGiftCard: (payload: { amount: number; recipient_name?: string; recipient_email?: string; message?: string; theme_style?: "fun_party" | "fun_pop" | "glam_chic" | "glam_luxe" }) =>
+      request<{ gift_card: GiftCard; payment_details: GiftCardPaymentDetails }>("/api/customers/gift-cards", {
+        method: "POST",
+        customerAuth: true,
+        body: JSON.stringify(payload),
+      }),
   },
   services: {
     listPublic: () => request<Service[]>("/api/services"),
@@ -438,6 +530,15 @@ export const api = {
         auth: true,
       }),
   },
+  giftCards: {
+    listAdmin: () => request<Array<GiftCard & { customer_name: string; customer_email: string }>>("/api/admin/gift-cards", { auth: true }),
+    updateAdmin: (id: string, payload: { status: GiftCardStatus; admin_note?: string }) =>
+      request<GiftCard>(`/api/admin/gift-cards/${id}`, {
+        method: "PATCH",
+        auth: true,
+        body: JSON.stringify(payload),
+      }),
+  },
   contact: {
     create: (payload: { name: string; email: string; phone: string; message: string }) =>
       request<{ ok: true }>("/api/contact", {
@@ -463,6 +564,8 @@ export const api = {
   },
   availability: {
     listPublic: () => request<AvailabilityResponse>("/api/availability"),
+    listPublicSlots: (date: string, service_id: string) =>
+      request<AvailabilitySlotsResponse>(`/api/availability/slots?date=${encodeURIComponent(date)}&service_id=${encodeURIComponent(service_id)}`),
     listAdmin: () => request<AvailabilityResponse>("/api/admin/availability", { auth: true }),
     listWeeklySchedule: () => request<WeeklyScheduleDay[]>("/api/admin/weekly-schedule", { auth: true }),
     saveWeeklySchedule: (days: WeeklyScheduleDay[]) =>
@@ -520,6 +623,37 @@ export const api = {
         method: "DELETE",
         auth: true,
       }),
+  },
+  protection: {
+    getConfig: () => request<ProtectionConfig>("/api/admin/protection/config", { auth: true }),
+    listAssets: () => request<ProtectionAsset[]>("/api/admin/protection/assets", { auth: true }),
+    listEvents: () => request<ProtectionEvent[]>("/api/admin/protection/events", { auth: true }),
+    verify: (payload: { dataUrl?: string; image_url?: string; sha256?: string; phash64?: string }) =>
+      request<ProtectionVerifyResponse>("/api/admin/protection/verify", {
+        method: "POST",
+        auth: true,
+        body: JSON.stringify(payload),
+      }),
+    report: (payload: {
+      asset_id?: string;
+      event_type?: string;
+      source_url?: string;
+      reporter?: string;
+      notes?: string;
+      evidence?: Record<string, unknown>;
+    }) =>
+      request<{ ok: true }>("/api/admin/protection/report", {
+        method: "POST",
+        auth: true,
+        body: JSON.stringify(payload),
+      }),
+    getDmcaTemplate: (params?: { asset_id?: string; source_url?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.asset_id) query.set("asset_id", params.asset_id);
+      if (params?.source_url) query.set("source_url", params.source_url);
+      const suffix = query.toString() ? `?${query.toString()}` : "";
+      return request<{ generated_at: string; asset: ProtectionAsset | null; source_url: string; template: string }>(`/api/admin/protection/dmca-template${suffix}`, { auth: true });
+    },
   },
   content: {
     listPublic: () => request<SiteContentItem[]>("/api/content"),

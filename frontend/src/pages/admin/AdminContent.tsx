@@ -22,6 +22,9 @@ const contentKeys = [
   { key: "privacy_contact_email", label: "Email vie privee", type: "text" },
   { key: "hosting_provider", label: "Hebergeur", type: "text" },
   { key: "hosting_address", label: "Adresse hebergeur", type: "text" },
+  { key: "giftcard_bank_account", label: "Cheque cadeau - numero de compte", type: "text" },
+  { key: "giftcard_bank_name", label: "Cheque cadeau - nom banque", type: "text" },
+  { key: "giftcard_transfer_instructions", label: "Cheque cadeau - instructions virement", type: "textarea" },
 ];
 
 const AdminContent = () => {

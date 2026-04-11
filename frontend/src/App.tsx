@@ -18,6 +18,7 @@ import AdminLogin from "./pages/AdminLogin";
 import AdminDashboard from "./pages/admin/AdminDashboard";
 import AdminSecurity from "./pages/admin/AdminSecurity";
 import Account from "./pages/Account";
+import GiftCards from "./pages/GiftCards";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import LegalNotice from "./pages/LegalNotice";
 
@@ -44,6 +45,7 @@ const AppRoutes = () => {
       <Route path="/contact" element={<><Navbar /><Contact /><Footer /></>} />
       <Route path="/rendez-vous" element={<><Navbar /><Booking /><Footer /></>} /> 
       <Route path="/compte" element={<><Navbar /><Account /><Footer /></>} />
+      <Route path="/cheques-cadeaux" element={<><Navbar /><GiftCards /><Footer /></>} />
       <Route path="/politique-de-confidentialite" element={<><Navbar /><PrivacyPolicy /><Footer /></>} />
       <Route path="/mentions-legales" element={<><Navbar /><LegalNotice /><Footer /></>} />
       <Route path="/admin/login" element={user ? <Navigate to="/admin" replace /> : <AdminLogin />} />

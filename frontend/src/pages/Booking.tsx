@@ -73,6 +73,12 @@ const Booking = () => {
     enabled: paymentReturn && Boolean(paymentBookingId),
     refetchInterval: ({ state }) => (state.data?.payment_status === "open" ? 5000 : false),
   });
+  const selectedDateKey = date ? format(date, "yyyy-MM-dd") : "";
+  const availableSlotsQuery = useQuery({
+    queryKey: ["availability-slots", selectedDateKey, serviceId],
+    queryFn: () => api.availability.listPublicSlots(selectedDateKey, serviceId),
+    enabled: Boolean(selectedDateKey && serviceId),
+  });
 
   const categories = useMemo(
     () => Array.from(new Set((services ?? []).map((service) => service.category))),
@@ -176,10 +182,9 @@ const Booking = () => {
   };
 
   const availableTimeSlots = useMemo(() => {
-    if (!date) return [];
-    const dateKey = format(date, "yyyy-MM-dd");
-    return timeSlots.filter((slot) => isSlotAvailable(dateKey, slot));
-  }, [date, timeSlots, slotAvailabilityMap, availabilityMap, weeklyScheduleMap, selectedService]);
+    if (!date || !serviceId) return [];
+    return availableSlotsQuery.data?.slots ?? [];
+  }, [date, serviceId, availableSlotsQuery.data]);
 
   useEffect(() => {
     if (!date || !time) return;
@@ -678,7 +683,18 @@ const Booking = () => {
                             <SelectValue placeholder="Choisir une heure" />
                           </SelectTrigger>
                           <SelectContent>
-                            {availableTimeSlots.map((slot) => <SelectItem key={slot} value={slot}>{slot}</SelectItem>)}
+                            {availableSlotsQuery.isLoading && (
+                              <SelectItem value="__loading_slots" disabled>Chargement des creneaux...</SelectItem>
+                            )}
+                            {availableSlotsQuery.isError && (
+                              <SelectItem value="__slots_error" disabled>Impossible de charger les creneaux</SelectItem>
+                            )}
+                            {!availableSlotsQuery.isLoading && !availableSlotsQuery.isError && availableTimeSlots.length === 0 && (
+                              <SelectItem value="__no_slots" disabled>Aucun creneau disponible</SelectItem>
+                            )}
+                            {!availableSlotsQuery.isLoading && !availableSlotsQuery.isError && availableTimeSlots.map((slot) => (
+                              <SelectItem key={slot} value={slot}>{slot}</SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                       </div>

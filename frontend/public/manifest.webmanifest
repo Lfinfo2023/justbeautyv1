@@ -1,0 +1,25 @@
+{
+  "name": "Just Beauty by Justine",
+  "short_name": "Just Beauty",
+  "description": "Reservation en ligne Just Beauty by Justine",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8f1ec",
+  "theme_color": "#d7b2a3",
+  "lang": "fr",
+  "icons": [
+    {
+      "src": "/logo.jpg",
+      "sizes": "192x192",
+      "type": "image/jpeg",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
+}

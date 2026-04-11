@@ -26,11 +26,18 @@ const Index = () => {
             <p className="text-muted-foreground font-body text-lg mb-10 max-w-xl mx-auto leading-relaxed">
               {contentMap.hero_subtitle || "Bienvenue chez Just Beauty by Justine, institut de beaute pres de Bastogne. Massages, soins du visage, epilation, manucure et pedicure sur rendez-vous."}
             </p>
-            <Link to="/rendez-vous">
-              <Button size="lg" className="bg-primary text-primary-foreground hover:bg-rose-gold hover:text-card font-body tracking-wide px-10 py-6 text-base rounded-full transition-all duration-300 shadow-lg shadow-primary/20">
-                Prendre rendez-vous
-              </Button>
-            </Link>
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              <Link to="/rendez-vous">
+                <Button size="lg" className="bg-primary text-primary-foreground hover:bg-rose-gold hover:text-card font-body tracking-wide px-10 py-6 text-base rounded-full transition-all duration-300 shadow-lg shadow-primary/20">
+                  Prendre rendez-vous
+                </Button>
+              </Link>
+              <Link to="/cheques-cadeaux">
+                <Button size="lg" variant="outline" className="font-body tracking-wide px-10 py-6 text-base rounded-full border-primary text-foreground bg-card/70 hover:bg-primary/20">
+                  Commander un cheque cadeau
+                </Button>
+              </Link>
+            </div>
           </AnimatedSection>
         </div>
       </section>

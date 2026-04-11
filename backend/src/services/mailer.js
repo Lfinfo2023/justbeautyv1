@@ -48,8 +48,8 @@ export const createMailer = async (env) => {
         const clientHtml = renderMailShell({
           logoUrl,
           eyebrow: "Just Beauty",
-          title: `Votre demande pour ${serviceLabel} est bien enregistree`,
-          intro: `Bonjour ${booking.client_name}, votre demande de rendez-vous a bien ete recue et attend maintenant la confirmation de Justine.`,
+          title: `Votre demande pour ${serviceLabel} est bien enregistrée`,
+          intro: `Bonjour ${booking.client_name}, votre demande de rendez-vous à bien été reçue et attend maintenant la confirmation de Justine.`,
           details: [
             { label: "Cliente", value: booking.client_name },
             { label: "Service", value: serviceLabel },
@@ -57,7 +57,7 @@ export const createMailer = async (env) => {
             { label: "Heure", value: booking.booking_time.slice(0, 5) },
             { label: "Telephone", value: booking.client_phone || "Non renseigne" },
           ],
-          closing: "Merci pour votre confiance. Pensez aussi a verifier votre dossier spam ou courrier indesirable.",
+          closing: "Merci pour votre confiance. Pensez aussi à vérifier votre dossier spam ou courrier indésirable.",
         });
 
         const adminCta = `
@@ -67,7 +67,7 @@ export const createMailer = async (env) => {
 
         const adminHtml = renderMailShell({
           logoUrl,
-          eyebrow: "Nouvelle reservation",
+          eyebrow: "Nouvelle réservation",
           title: `Nouvelle demande: ${booking.client_name} - ${serviceLabel}`,
           intro: "Vous pouvez traiter ce rendez-vous directement depuis cet email, sans passer par l'administration.",
           details: [
@@ -79,7 +79,7 @@ export const createMailer = async (env) => {
             { label: "Heure", value: booking.booking_time.slice(0, 5) },
           ],
           cta: adminCta,
-          closing: "En cas de refus, la cliente sera invitee a reprogrammer son rendez-vous.",
+          closing: "En cas de refus, la cliente sera invitée à reprogrammer son rendez-vous.",
         });
 
         await transporter.sendMail({
@@ -103,13 +103,13 @@ export const createMailer = async (env) => {
 
         const clientHtml = renderMailShell({
           logoUrl,
-          eyebrow: isConfirmed ? "Rendez-vous confirme" : "Rendez-vous a reprogrammer",
+          eyebrow: isConfirmed ? "Rendez-vous confirmé" : "Rendez-vous à reprogrammer",
           title: isConfirmed
-            ? `Votre rendez-vous pour ${serviceLabel} est confirme`
-            : `Votre rendez-vous pour ${serviceLabel} n'a pas pu etre maintenu`,
+            ? `Votre rendez-vous pour ${serviceLabel} est confirmé`
+            : `Votre rendez-vous pour ${serviceLabel} n'a pas pu être maintenu`,
           intro: isConfirmed
-            ? `Bonjour ${booking.client_name}, bonne nouvelle: votre rendez-vous vient d'etre confirme par Just Beauty.`
-            : `Bonjour ${booking.client_name}, votre demande n'a malheureusement pas pu etre maintenue sur le creneau choisi.`,
+            ? `Bonjour ${booking.client_name}, bonne nouvelle: votre rendez-vous vient d'être confirmé par Just Beauty.`
+            : `Bonjour ${booking.client_name}, votre demande n'a malheureusement pas pu être maintenue sur le creneau choisi.`,
           details: [
             { label: "Cliente", value: booking.client_name },
             { label: "Service", value: serviceLabel },
@@ -120,16 +120,16 @@ export const createMailer = async (env) => {
             ? `<a href="${escapeHtml(`${publicBaseUrl}/rendez-vous`)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Reprogrammer mon rendez-vous</a>`
             : "",
           closing: isConfirmed
-            ? "Pensez a verifier egalement vos spams si vous ne retrouvez pas nos prochains emails."
-            : "Nous vous invitons a reprogrammer un nouveau moment cocooning via le site quand vous le souhaitez.",
+            ? "Pensez à vérifier également vos spams si vous ne retrouvez pas nos prochains emails."
+            : "Nous vous invitons à reprogrammer un nouveau moment cocooning via le site quand vous le souhaitez.",
         });
 
         await transporter.sendMail({
           from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
           to: booking.client_email,
           subject: isConfirmed
-            ? `Just Beauty | Rendez-vous confirme - ${booking.client_name} - ${serviceLabel}`
-            : `Just Beauty | Rendez-vous a reprogrammer - ${booking.client_name} - ${serviceLabel}`,
+            ? `Just Beauty | Rendez-vous confirmé - ${booking.client_name} - ${serviceLabel}`
+            : `Just Beauty | Rendez-vous à reprogrammer - ${booking.client_name} - ${serviceLabel}`,
           html: clientHtml,
         });
       },
@@ -138,22 +138,22 @@ export const createMailer = async (env) => {
         const adminHtml = renderMailShell({
           logoUrl,
           eyebrow: "Nouveau message",
-          title: "Le formulaire de contact vient d'etre utilise",
-          intro: "Un message client vient d'etre envoye depuis le site Just Beauty.",
+          title: "Le formulaire de contact vient d'etre utilisé",
+          intro: "Un message client vient d'etre envoyé depuis le site Just Beauty.",
           details: [
             { label: "Nom", value: message.client_name },
             { label: "Email", value: message.client_email },
             { label: "Telephone", value: message.client_phone || "Non renseigne" },
             { label: "Message", value: message.message },
           ],
-          closing: "Vous pouvez repondre directement a l'adresse email de la cliente si necessaire.",
+          closing: "Vous pouvez répondre directement à l'adresse email de la cliente si nécessaire.",
         });
 
         const clientHtml = renderMailShell({
           logoUrl,
           eyebrow: "Just Beauty",
-          title: "Votre message a bien ete envoye",
-          intro: `Bonjour ${message.client_name}, nous avons bien recu votre message et nous reviendrons vers vous rapidement.`,
+          title: "Votre message a bien été envoyé",
+          intro: `Bonjour ${message.client_name}, nous avons bien reçu votre message et nous reviendrons vers vous rapidement.`,
           details: [
             { label: "Email", value: message.client_email },
             { label: "Telephone", value: message.client_phone || "Non renseigne" },
@@ -173,7 +173,7 @@ export const createMailer = async (env) => {
         await transporter.sendMail({
           from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
           to: message.client_email,
-          subject: "Just Beauty | Nous avons bien recu votre message",
+          subject: "Just Beauty | Nous avons bien reçu votre message",
           html: clientHtml,
         });
       },

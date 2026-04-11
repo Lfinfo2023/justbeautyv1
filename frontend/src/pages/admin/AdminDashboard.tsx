@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
-import { CalendarDays, Scissors, Image, FileText, LogOut, Menu, ArrowLeft, Settings, Users } from "lucide-react";
+import { CalendarDays, Scissors, Image, FileText, LogOut, Menu, ArrowLeft, Settings, Users, Ticket } from "lucide-react";
 import AdminBookings from "./AdminBookings";
 import AdminServices from "./AdminServices";
 import AdminGallery from "./AdminGallery";
@@ -10,6 +10,7 @@ import AdminContent from "./AdminContent";
 import AdminCalendar from "./AdminCalendar";
 import AdminSettings from "./AdminSettings";
 import AdminCustomers from "./AdminCustomers";
+import AdminGiftCards from "./AdminGiftCards";
 import BrandWordmark from "@/components/BrandWordmark";
 
 const tabs = [
@@ -17,6 +18,7 @@ const tabs = [
   { id: "calendar", label: "Calendrier", icon: CalendarDays },
   { id: "services", label: "Services", icon: Scissors },
   { id: "customers", label: "Clients", icon: Users },
+  { id: "gift-cards", label: "Cartes cadeaux", icon: Ticket },
   { id: "gallery", label: "Galerie", icon: Image },
   { id: "content", label: "Contenu", icon: FileText },
   { id: "settings", label: "Parametres", icon: Settings },
@@ -82,6 +84,7 @@ const AdminDashboard = () => {
           {activeTab === "calendar" && <AdminCalendar />}
           {activeTab === "services" && <AdminServices />}
           {activeTab === "customers" && <AdminCustomers />}
+          {activeTab === "gift-cards" && <AdminGiftCards />}
           {activeTab === "gallery" && <AdminGallery />}
           {activeTab === "content" && <AdminContent />}
           {activeTab === "settings" && <AdminSettings />}
