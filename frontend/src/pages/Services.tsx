@@ -109,12 +109,7 @@ const Services = () => {
             })}
           </div>
 
-          <AnimatedSection delay={0.2}>
-            <div className="mt-8 rounded-2xl border border-border/50 bg-muted/30 p-6 text-sm text-muted-foreground">
-              <p>En manucure, les prestations principales sont séparées des options et suppléments pour rendre la carte plus lisible.</p>
-              <p className="mt-2">Les durées affichées sont indicatives et peuvent varier selon le soin choisi et le résultat souhaité.</p>
-            </div>
-          </AnimatedSection>
+          
         </div>
       </section>
     </main>

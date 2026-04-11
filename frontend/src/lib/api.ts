@@ -354,6 +354,16 @@ export const api = {
       request<{ ok: true }>(`/api/bookings/payment-status/${id}/cancel`, {
         method: "POST",
       }),
+    getBalancePaymentStatus: (id: string) =>
+      request<BookingPaymentStatusResponse>(`/api/bookings/balance-payment-status/${id}`),
+    retryBalancePayment: (id: string) =>
+      request<BookingPaymentStatusResponse>(`/api/bookings/balance-payment-status/${id}/retry`, {
+        method: "POST",
+      }),
+    cancelBalancePayment: (id: string) =>
+      request<{ ok: true; booking?: Booking }>(`/api/bookings/balance-payment-status/${id}/cancel`, {
+        method: "POST",
+      }),
     listAdmin: () => request<Booking[]>("/api/admin/bookings", { auth: true }),
     updateStatus: (id: string, status: BookingStatus) =>
       request<void>(`/api/admin/bookings/${id}`, {

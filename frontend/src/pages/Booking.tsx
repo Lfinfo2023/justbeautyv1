@@ -318,7 +318,7 @@ const Booking = () => {
       setAuthError(result.error.message || "Connexion impossible");
       return;
     }
-    toast.success("Compte connecte pour cette reservation");
+    toast.success("Compte connecte pour cette réservation");
   };
 
   const toggleOption = (optionId: string) => {
@@ -401,9 +401,9 @@ const Booking = () => {
                 <div className="bg-card rounded-2xl p-10 border border-border/50 shadow-sm space-y-4">
                   <AlertCircle className="mx-auto text-rose-gold" size={36} />
                   <h1 className="font-display text-3xl text-foreground">Retour de paiement incomplet</h1>
-                  <p className="text-muted-foreground">Aucune reservation en attente de paiement n'a ete trouvee.</p>
+                  <p className="text-muted-foreground">Aucune réservation en attente de paiement n'a ete trouvée.</p>
                   <Button asChild className="rounded-full">
-                    <Link to="/rendez-vous">Revenir a la reservation</Link>
+                    <Link to="/rendez-vous">Revenir a la réservation</Link>
                   </Button>
                 </div>
               </AnimatedSection>
@@ -442,7 +442,7 @@ const Booking = () => {
                   <h1 className="font-display text-3xl text-foreground">Paiement introuvable</h1>
                   <p className="text-muted-foreground">Nous n'avons pas pu recuperer l'etat de ce paiement.</p>
                   <Button asChild className="rounded-full">
-                    <Link to="/rendez-vous">Revenir a la reservation</Link>
+                    <Link to="/rendez-vous">Revenir a la réservation</Link>
                   </Button>
                 </div>
               </AnimatedSection>
@@ -486,7 +486,7 @@ const Booking = () => {
                 <p className="text-muted-foreground">
                   {isOpen
                     ? "Le paiement Mollie est encore ouvert. Nous reverifions automatiquement toutes les 5 secondes, notamment pour un virement choisi directement dans Mollie."
-                    : "La reservation n'est pas encore validee. Vous pouvez relancer le paiement ou annuler cette demande."}
+                    : "La réservation n'est pas encore validée. Vous pouvez relancer le paiement ou annuler cette demande."}
                 </p>
                 <div className="flex flex-col sm:flex-row gap-3 justify-center">
                   {isOpen && payload.booking.deposit_checkout_url && (
@@ -527,7 +527,7 @@ const Booking = () => {
         <div className="container-narrow max-w-2xl">
           <AnimatedSection>
             <div className="text-center mb-12">
-              <p className="text-sm tracking-[0.3em] uppercase text-muted-foreground mb-3">Reservation</p>
+              <p className="text-sm tracking-[0.3em] uppercase text-muted-foreground mb-3">Réservation</p>
               <h1 className="font-display text-4xl md:text-5xl text-foreground">
                 Prendre <span className="italic text-gradient-rose">rendez-vous</span>
               </h1>
@@ -552,10 +552,10 @@ const Booking = () => {
               <div className="bg-card rounded-2xl p-8 border border-border/50 shadow-sm">
                 {step === 1 && (
                   <div className="space-y-6">
-                    <h2 className="font-display text-xl text-foreground mb-4">Choisissez votre categorie puis votre soin</h2>
+                    <h2 className="font-display text-xl text-foreground mb-4">Choisissez votre catégorie puis votre soin</h2>
 
                     <div>
-                      <label className="text-sm text-muted-foreground mb-2 block">Categorie</label>
+                      <label className="text-sm text-muted-foreground mb-2 block">Catégorie</label>
                       <Select
                         value={category}
                         onValueChange={(value) => {
@@ -565,7 +565,7 @@ const Booking = () => {
                         }}
                       >
                         <SelectTrigger className="rounded-lg bg-muted/50">
-                          <SelectValue placeholder="Selectionnez une categorie" />
+                          <SelectValue placeholder="Sélectionnez une catégorie" />
                         </SelectTrigger>
                         <SelectContent>
                           {categories.map((item) => (
@@ -579,7 +579,7 @@ const Booking = () => {
                       <label className="text-sm text-muted-foreground mb-2 block">Service</label>
                       <Select value={serviceId} onValueChange={setServiceId} disabled={!category}>
                         <SelectTrigger className="rounded-lg bg-muted/50">
-                          <SelectValue placeholder={category ? "Selectionnez un service" : "Choisissez d'abord une categorie"} />
+                          <SelectValue placeholder={category ? "Sélectionnez un service" : "Choisissez d'abord une catégorie"} />
                         </SelectTrigger>
                         <SelectContent>
                           {primaryServicesForCategory.map((service) => (
@@ -602,7 +602,7 @@ const Booking = () => {
                           </p>
                         )}
                         {!depositPreview.required && paymentSettings?.enabled && depositPreview.trusted && (
-                          <p className="text-foreground">Votre compte client de confiance est dispense d'acompte.</p>
+                          <p className="text-foreground">Votre compte client de confiance est dispensé d'acompte.</p>
                         )}
                       </div>
                     )}

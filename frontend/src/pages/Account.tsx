@@ -55,7 +55,7 @@ const Account = () => {
                   )}
                 </div>
                 <Button variant="outline" className="rounded-full" onClick={() => signOut()}>
-                  Se deconnecter
+                  Se déconnecter
                 </Button>
               </div>
             </AnimatedSection>
@@ -65,18 +65,18 @@ const Account = () => {
                 <div className="bg-card rounded-2xl border border-border/50 p-6 space-y-4">
                   <h2 className="font-display text-2xl text-foreground">Fidelite</h2>
                   <p className="text-5xl font-display text-foreground">{customer.loyalty_completed_visits}</p>
-                  <p className="text-sm text-muted-foreground">passage(s) valide(s).</p>
+                  <p className="text-sm text-muted-foreground">passage(s) validé(s).</p>
                   <div className="rounded-xl bg-muted/40 p-4 space-y-2 text-sm">
                     <p className="font-medium text-foreground">
                       {customer.loyalty_available_discounts > 0
-                        ? `${customer.loyalty_available_discounts} reduction(s) de ${customer.loyalty_discount_rate}% disponible(s)`
-                        : `Reduction de ${customer.loyalty_discount_rate}% apres 10 passages`}
+                        ? `${customer.loyalty_available_discounts} réduction(s) de ${customer.loyalty_discount_rate}% disponible(s)`
+                        : `Réduction de ${customer.loyalty_discount_rate}% apres 10 passages`}
                     </p>
                     <p className="text-muted-foreground">
                       Progression actuelle : {customer.loyalty_progress_visits}/10 passages sur le cycle en cours.
                     </p>
                     <p className="text-muted-foreground">
-                      Plus que {customer.loyalty_visits_until_discount} passage(s) avant la prochaine reduction.
+                      Plus que {customer.loyalty_visits_until_discount} passage(s) avant la prochaine réduction.
                     </p>
                   </div>
                   <div className="space-y-3 pt-2">
@@ -98,7 +98,7 @@ const Account = () => {
                   <h2 className="font-display text-2xl text-foreground mb-4">Mes rendez-vous</h2>
                   <div className="space-y-3">
                     {bookings.length === 0 && (
-                      <p className="text-sm text-muted-foreground">Aucun rendez-vous rattache a ce compte.</p>
+                      <p className="text-sm text-muted-foreground">Aucun rendez-vous rattaché à ce compte.</p>
                     )}
                     {bookings.map((booking) => (
                       <div key={booking.id} className="rounded-xl border border-border/50 bg-muted/30 p-4">
@@ -116,7 +116,7 @@ const Account = () => {
                   <div className="rounded-2xl border border-red-300 bg-red-50 p-5 space-y-3">
                     <h3 className="font-display text-xl text-red-800">Demande de suppression du compte</h3>
                     <p className="text-sm text-red-700">
-                      Si vous demandez vous-meme la suppression, un delai de 3 jours est lance avant l'effacement definitif du compte et des donnees associees.
+                      Si vous demandez vous-même la suppression, un delai de 3 jours est lance avant l'effacement définitif du compte et des données associées.
                     </p>
                     <Button
                       type="button"
@@ -174,7 +174,7 @@ const Account = () => {
                   className="rounded-full w-full sm:w-auto"
                   onClick={() => setMode("register")}
                 >
-                  Creer un compte
+                  Créer un compte
                 </Button>
               </div>
 

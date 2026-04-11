@@ -42,7 +42,7 @@ const AppRoutes = () => {
       <Route path="/services" element={<><Navbar /><Services /><Footer /></>} />
       <Route path="/galerie" element={<><Navbar /><Gallery /><Footer /></>} />
       <Route path="/contact" element={<><Navbar /><Contact /><Footer /></>} />
-      <Route path="/rendez-vous" element={<><Navbar /><Booking /><Footer /></>} />
+      <Route path="/rendez-vous" element={<><Navbar /><Booking /><Footer /></>} /> 
       <Route path="/compte" element={<><Navbar /><Account /><Footer /></>} />
       <Route path="/politique-de-confidentialite" element={<><Navbar /><PrivacyPolicy /><Footer /></>} />
       <Route path="/mentions-legales" element={<><Navbar /><LegalNotice /><Footer /></>} />
