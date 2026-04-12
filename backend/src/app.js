@@ -506,27 +506,43 @@ const renderMailShell = ({ title, eyebrow, intro, details, closing, cta, logoUrl
 const GIFT_CARD_THEMES = {
   fun_party: {
     label: "Drole - Party",
-    imagePath: "/assets/gift/fun-party.png",
+    imagePath: "/assets/gift/fun-party2.png",
     frame: "#ffccbc",
-    text: "#3e2723",
+    titleColor: "#7a2f00",
+    labelColor: "#6d1f1f",
+    valueColor: "#2f195f",
+    messageColor: "#4b2e00",
+    textBg: "rgba(255,245,232,0.85)",
   },
   fun_pop: {
     label: "Drole - Pop",
-    imagePath: "/assets/gift/fun-pop.png",
+    imagePath: "/assets/gift/fun-pop2.png",
     frame: "#f8bbd0",
-    text: "#311b92",
+    titleColor: "#6a00a8",
+    labelColor: "#8a0055",
+    valueColor: "#1f3fb2",
+    messageColor: "#5b1f7f",
+    textBg: "rgba(255,240,252,0.84)",
   },
   glam_chic: {
     label: "Glamour - Chic",
-    imagePath: "/assets/gift/glam-chic.png",
+    imagePath: "/assets/gift/glam-chic2.png",
     frame: "#d7ccc8",
-    text: "#fff8f2",
+    titleColor: "#5d2e28",
+    labelColor: "#6b3a33",
+    valueColor: "#3c2220",
+    messageColor: "#6a3f39",
+    textBg: "rgba(255,248,242,0.82)",
   },
   glam_luxe: {
     label: "Glamour - Luxe",
-    imagePath: "/assets/gift/glam-luxe.png",
+    imagePath: "/assets/gift/glam-luxe2.png",
     frame: "#cdb7a6",
-    text: "#fff7ef",
+    titleColor: "#d8b98f",
+    labelColor: "#ead6b5",
+    valueColor: "#f7e9cf",
+    messageColor: "#fff1dc",
+    textBg: "rgba(25,18,16,0.62)",
   },
 };
 
@@ -543,11 +559,11 @@ const buildGiftCardEmailCardHtml = ({ giftCard, customer, publicBaseUrl }) => {
   const backgroundImageUrl = `${String(publicBaseUrl || "").replace(/\/$/, "")}${theme.imagePath}`;
   return `
     <div style="border:1px solid ${theme.frame};border-radius:20px;overflow:hidden;background-image:url('${escapeHtml(backgroundImageUrl)}');background-size:cover;background-position:center;background-repeat:no-repeat;padding:22px 22px 18px;box-shadow:0 12px 30px rgba(0,0,0,0.14);">
-      <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:${theme.text};opacity:.92;margin-bottom:10px;">Just Beauty - cheque cadeau</div>
-      <div style="font-size:28px;line-height:1.15;font-weight:700;color:${theme.text};margin-bottom:14px;">${escapeHtml(Number(giftCard.amount || 0).toFixed(2))} ${escapeHtml(giftCard.currency || "EUR")}</div>
-      <div style="font-size:14px;line-height:1.5;color:${theme.text};margin-bottom:8px;"><strong>Pour :</strong> ${escapeHtml(ownerName)}</div>
-      <div style="font-size:14px;line-height:1.5;color:${theme.text};margin-bottom:8px;"><strong>Code :</strong> ${escapeHtml(giftCard.code || "")}</div>
-      ${messageLine ? `<div style="font-size:14px;line-height:1.5;color:${theme.text};"><strong>Message :</strong> ${escapeHtml(messageLine)}</div>` : ""}
+      <div style="display:inline-block;padding:5px 10px;border-radius:999px;background:${theme.textBg};font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:${theme.labelColor};margin-bottom:10px;">Just Beauty - cheque cadeau</div>
+      <div style="display:inline-block;padding:8px 12px;border-radius:12px;background:${theme.textBg};font-size:28px;line-height:1.15;font-weight:700;color:${theme.titleColor};margin-bottom:14px;">${escapeHtml(Number(giftCard.amount || 0).toFixed(2))} ${escapeHtml(giftCard.currency || "EUR")}</div>
+      <div style="display:block;width:fit-content;padding:6px 10px;border-radius:10px;background:${theme.textBg};font-size:14px;line-height:1.5;color:${theme.valueColor};margin-bottom:8px;"><strong style="color:${theme.labelColor};">Pour :</strong> ${escapeHtml(ownerName)}</div>
+      <div style="display:block;width:fit-content;padding:6px 10px;border-radius:10px;background:${theme.textBg};font-size:14px;line-height:1.5;color:${theme.valueColor};margin-bottom:${messageLine ? "8px" : "0"};"><strong style="color:${theme.labelColor};">Code :</strong> ${escapeHtml(giftCard.code || "")}</div>
+      ${messageLine ? `<div style="display:block;width:fit-content;max-width:100%;padding:6px 10px;border-radius:10px;background:${theme.textBg};font-size:14px;line-height:1.5;color:${theme.messageColor};"><strong style="color:${theme.labelColor};">Message :</strong> ${escapeHtml(messageLine)}</div>` : ""}
     </div>
   `;
 };
@@ -4187,6 +4203,19 @@ const createApp = async () => {
         } catch (error) {
           send.json(res, 400, { error: error instanceof Error ? error.message : "Impossible de mettre a jour le cheque cadeau" });
         }
+        return;
+      }
+
+      if (pathname.match(/^\/api\/admin\/gift-cards\/[^/]+$/) && req.method === "DELETE") {
+        if (!requireAdmin(req, res)) return;
+        const id = pathname.split("/")[4];
+        const existing = db.prepare("SELECT id FROM gift_cards WHERE id = ?").get(id);
+        if (!existing) {
+          send.json(res, 404, { error: "Cheque cadeau introuvable" });
+          return;
+        }
+        db.prepare("DELETE FROM gift_cards WHERE id = ?").run(id);
+        send.empty(res);
         return;
       }
 

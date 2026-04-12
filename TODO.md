@@ -10,6 +10,3 @@
 - [ ] Faire page A4 de juju sans faute
 
 
-### Carte cadeaux
-- [ ] Verifier alignement texte dans ui coté commande
-- [ ] Verifier alignement texte dans ui coté mail

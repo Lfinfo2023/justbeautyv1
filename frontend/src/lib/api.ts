@@ -538,6 +538,11 @@ export const api = {
         auth: true,
         body: JSON.stringify(payload),
       }),
+    remove: (id: string) =>
+      request<void>(`/api/admin/gift-cards/${id}`, {
+        method: "DELETE",
+        auth: true,
+      }),
   },
   contact: {
     create: (payload: { name: string; email: string; phone: string; message: string }) =>

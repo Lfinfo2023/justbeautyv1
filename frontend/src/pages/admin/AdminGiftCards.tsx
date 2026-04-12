@@ -5,11 +5,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 
-type FilterMode = "all" | "pending" | "active" | "used" | "expired";
+type FilterMode = "open" | "pending" | "active" | "archived";
 
 const AdminGiftCards = () => {
   const queryClient = useQueryClient();
-  const [filter, setFilter] = useState<FilterMode>("all");
+  const [filter, setFilter] = useState<FilterMode>("open");
   const [notes, setNotes] = useState<Record<string, string>>({});
 
   const { data, isLoading } = useQuery({
@@ -27,12 +27,21 @@ const AdminGiftCards = () => {
     },
     onError: (error: Error) => toast.error(error.message || "Impossible de mettre a jour"),
   });
+  const removeCard = useMutation({
+    mutationFn: async (id: string) => api.giftCards.remove(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-gift-cards"] });
+      toast.success("Cheque cadeau supprime");
+    },
+    onError: (error: Error) => toast.error(error.message || "Impossible de supprimer le cheque cadeau"),
+  });
 
   const cards = useMemo(() => {
     const items = [...(data || [])];
-    if (filter === "all") return items;
+    if (filter === "open") return items.filter((item) => item.status !== "used" && item.status !== "expired");
     if (filter === "pending") return items.filter((item) => item.status === "pending_payment");
-    return items.filter((item) => item.status === filter);
+    if (filter === "active") return items.filter((item) => item.status === "active");
+    return items.filter((item) => item.status === "used" || item.status === "expired");
   }, [data, filter]);
 
   const getStatusLabel = (status: string) => {
@@ -54,11 +63,10 @@ const AdminGiftCards = () => {
           <p className="text-sm text-muted-foreground mt-1">Validation manuelle apres reception du virement bancaire.</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant={filter === "all" ? "default" : "outline"} className="rounded-full" onClick={() => setFilter("all")}>Tous</Button>
+          <Button variant={filter === "open" ? "default" : "outline"} className="rounded-full" onClick={() => setFilter("open")}>En cours</Button>
           <Button variant={filter === "pending" ? "default" : "outline"} className="rounded-full" onClick={() => setFilter("pending")}>En attente</Button>
           <Button variant={filter === "active" ? "default" : "outline"} className="rounded-full" onClick={() => setFilter("active")}>Actives</Button>
-          <Button variant={filter === "used" ? "default" : "outline"} className="rounded-full" onClick={() => setFilter("used")}>Utilisees</Button>
-          <Button variant={filter === "expired" ? "default" : "outline"} className="rounded-full" onClick={() => setFilter("expired")}>Expirees</Button>
+          <Button variant={filter === "archived" ? "default" : "outline"} className="rounded-full" onClick={() => setFilter("archived")}>Archives</Button>
         </div>
       </div>
 
@@ -122,6 +130,19 @@ const AdminGiftCards = () => {
                 onClick={() => updateStatus.mutate({ id: card.id, status: "pending_payment", admin_note: notes[card.id] })}
               >
                 Remettre en attente
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                className="rounded-full"
+                disabled={removeCard.isPending}
+                onClick={() => {
+                  const confirmed = window.confirm(`Supprimer definitivement le cheque cadeau ${card.code} ?`);
+                  if (!confirmed) return;
+                  removeCard.mutate(card.id);
+                }}
+              >
+                Supprimer
               </Button>
             </div>
           </div>
