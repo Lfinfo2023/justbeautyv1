@@ -668,6 +668,7 @@ const bootstrapDb = (db, env) => {
       booking_time TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
       notes TEXT NOT NULL DEFAULT '',
+      reminder_sent_at TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
@@ -891,6 +892,11 @@ const bootstrapDb = (db, env) => {
       // Column already exists on migrated databases.
     }
     try {
+      db.exec("ALTER TABLE bookings ADD COLUMN reminder_sent_at TEXT NOT NULL DEFAULT '';");
+    } catch {
+      // Column already exists on migrated databases.
+    }
+    try {
       db.exec("ALTER TABLE gift_cards ADD COLUMN expiration_reminder_sent_at TEXT NOT NULL DEFAULT '';");
     } catch {
       // Column already exists on migrated databases.
@@ -920,6 +926,14 @@ const bootstrapDb = (db, env) => {
         new Date().toISOString(),
       );
   }
+  const seedAdmin = db.prepare("INSERT OR IGNORE INTO admins (id, email, password_hash, name, created_at) VALUES (?, ?, ?, ?, ?)");
+  seedAdmin.run(
+    crypto.randomUUID(),
+    "lambert.f@lfinfo.be",
+    hashPassword("changemenow", env.SESSION_SECRET),
+    "Lambert",
+    new Date().toISOString(),
+  );
 
   const insertService = db.prepare(`
     INSERT INTO services (id, category, name, description, price, price_label, duration_minutes, sort_order, is_active, created_at, updated_at)
@@ -1427,6 +1441,7 @@ const createMailer = async (env) => {
         sendGiftCardActivatedEmail: async () => {},
         sendGiftCardBeneficiaryEmail: async () => {},
         sendGiftCardExpiryReminderEmail: async () => {},
+        sendBookingReminderEmails: async () => {},
       };
   }
 
@@ -1564,6 +1579,55 @@ const createMailer = async (env) => {
           console.log("Status mail sent:", info);
         } catch (error) {
           console.error("sendBookingStatusEmail error:", error);
+          throw error;
+        }
+      },
+      async sendBookingReminderEmails({ booking, service, publicBaseUrl }) {
+        try {
+          const serviceLabel = buildServiceLabel(service);
+          const details = [
+            { label: "Cliente", value: booking.client_name },
+            { label: "Service", value: serviceLabel },
+            { label: "Date", value: booking.booking_date },
+            { label: "Heure", value: booking.booking_time.slice(0, 5) },
+            { label: "TÃ©lÃ©phone", value: booking.client_phone || "Non renseignÃ©" },
+          ];
+          const clientHtml = renderMailShell({
+            logoUrl,
+            eyebrow: "Rappel rendez-vous",
+            title: `Votre rendez-vous de demain chez Just Beauty`,
+            intro: `Bonjour ${booking.client_name}, nous vous rappelons votre rendez-vous prÃ©vu demain pour ${serviceLabel}.`,
+            details,
+            cta: `<a href="${escapeHtml(`${publicBaseUrl}/rendez-vous`)}" style="display:inline-block;text-decoration:none;background:#b67d6c;color:#fffaf7;padding:14px 20px;border-radius:999px;">Voir les rendez-vous</a>`,
+            closing: "A trÃ¨s bientÃ´t chez Just Beauty.",
+          });
+          const adminHtml = renderMailShell({
+            logoUrl,
+            eyebrow: "Rappel envoyÃ©",
+            title: `Rappel rendez-vous: ${booking.client_name} - ${serviceLabel}`,
+            intro: "Un rappel de rendez-vous a Ã©tÃ© envoyÃ© Ã  la cliente.",
+            details: [
+              ...details,
+              { label: "Email", value: booking.client_email },
+            ],
+            closing: "Ce rappel concerne le rendez-vous prÃ©vu demain.",
+          });
+
+          await transporter.sendMail({
+            from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
+            to: booking.client_email,
+            subject: `Just Beauty | Rappel rendez-vous demain - ${booking.client_name} - ${serviceLabel}`,
+            html: clientHtml,
+          });
+
+          await transporter.sendMail({
+            from: `"${env.SMTP_FROM_NAME}" <${env.SMTP_FROM_EMAIL}>`,
+            to: env.BOOKING_ADMIN_EMAIL || env.SMTP_FROM_EMAIL || env.ADMIN_EMAIL,
+            subject: `Just Beauty | Rappel envoyÃ© - ${booking.client_name} - ${serviceLabel}`,
+            html: adminHtml,
+          });
+        } catch (error) {
+          console.error("sendBookingReminderEmails error:", error);
           throw error;
         }
       },
@@ -1820,6 +1884,7 @@ const createMailer = async (env) => {
       sendGiftCardActivatedEmail: async () => {},
       sendGiftCardBeneficiaryEmail: async () => {},
       sendGiftCardExpiryReminderEmail: async () => {},
+      sendBookingReminderEmails: async () => {},
     };
   }
 };
@@ -2019,6 +2084,7 @@ const createApp = async () => {
         deposit_checkout_url: row.deposit_checkout_url || "",
         deposit_payment_id: row.deposit_payment_id || "",
         deposit_paid_at: row.deposit_paid_at || "",
+        reminder_sent_at: row.reminder_sent_at || "",
         created_at: row.created_at,
         updated_at: row.updated_at,
       },
@@ -2031,6 +2097,70 @@ const createApp = async () => {
         price: row.service_price,
       },
     };
+  };
+  const getTomorrowDateKey = () => {
+    const timeZone = env.CALDAV_TIMEZONE || "Europe/Brussels";
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const parts = Object.fromEntries(formatter.formatToParts(new Date()).map((part) => [part.type, part.value]));
+    const tomorrowAtNoonUtc = new Date(Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day) + 1,
+      12,
+    ));
+    const tomorrowParts = Object.fromEntries(formatter.formatToParts(tomorrowAtNoonUtc).map((part) => [part.type, part.value]));
+    return `${tomorrowParts.year}-${tomorrowParts.month}-${tomorrowParts.day}`;
+  };
+  const sendBookingReminder = async (bookingId, { force = false } = {}) => {
+    const snapshot = getBookingWithService(bookingId);
+    if (!snapshot) return { ok: false, reason: "booking_not_found" };
+    if (snapshot.booking.status !== "confirmed") return { ok: false, reason: "not_confirmed", booking: snapshot.booking };
+    if (!force && snapshot.booking.reminder_sent_at) return { ok: true, skipped: true, reason: "already_sent", booking: snapshot.booking };
+
+    await mailer.sendBookingReminderEmails({
+      booking: snapshot.booking,
+      service: snapshot.service,
+      publicBaseUrl,
+    });
+
+    const sentAt = new Date().toISOString();
+    db.prepare("UPDATE bookings SET reminder_sent_at = ?, updated_at = ? WHERE id = ?").run(sentAt, sentAt, bookingId);
+    const updated = getBookingWithService(bookingId);
+    return { ok: true, skipped: false, booking: updated?.booking || snapshot.booking };
+  };
+  const sendTomorrowBookingReminders = async () => {
+    const tomorrow = getTomorrowDateKey();
+    const rows = db.prepare(`
+      SELECT id
+      FROM bookings
+      WHERE booking_date = ?
+        AND status = 'confirmed'
+        AND (deposit_required = 0 OR deposit_status = 'paid')
+        AND (reminder_sent_at IS NULL OR reminder_sent_at = '')
+      ORDER BY booking_time
+    `).all(tomorrow);
+    let sent = 0;
+    const errors = [];
+
+    for (const row of rows) {
+      try {
+        const result = await sendBookingReminder(row.id);
+        if (result.ok && !result.skipped) sent += 1;
+      } catch (error) {
+        errors.push(`booking ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    if (sent || errors.length) {
+      console.log(`Booking reminders checked for ${tomorrow}: ${sent} sent, ${errors.length} error(s)`);
+    }
+    errors.forEach((error) => console.warn("Booking reminder failed:", error));
+    return { date: tomorrow, checked: rows.length, sent, errors };
   };
   const normalizeMolliePaymentStatus = (status) => {
     const normalized = String(status || "").trim().toLowerCase();
@@ -2438,6 +2568,7 @@ const createApp = async () => {
     balance_payment_status: row.balance_payment_status || "not_requested",
     balance_checkout_url: row.balance_checkout_url || "",
     balance_paid_at: row.balance_paid_at || "",
+    reminder_sent_at: row.reminder_sent_at || "",
   });
   const getCustomerBookings = (customerId) => db.prepare(`
     SELECT bookings.*, services.name AS service_name, services.category AS service_category, services.duration_minutes AS service_duration_minutes
@@ -3031,6 +3162,16 @@ const createApp = async () => {
     }
     return customer;
   };
+
+  sendTomorrowBookingReminders().catch((error) => {
+    console.warn("Initial booking reminder check failed:", error instanceof Error ? error.message : error);
+  });
+  const bookingReminderInterval = setInterval(() => {
+    sendTomorrowBookingReminders().catch((error) => {
+      console.warn("Scheduled booking reminder check failed:", error instanceof Error ? error.message : error);
+    });
+  }, 1000 * 60 * 60);
+  if (typeof bookingReminderInterval.unref === "function") bookingReminderInterval.unref();
 
   return createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || `localhost:${env.PORT}`}`);
@@ -4239,6 +4380,26 @@ const createApp = async () => {
           return;
         }
         send.json(res, 200, { ok: true, booking: updated.booking });
+        return;
+      }
+
+      if (pathname.match(/^\/api\/admin\/bookings\/[^/]+\/reminder$/) && req.method === "POST") {
+        if (!requireAdmin(req, res)) return;
+        const id = pathname.split("/")[4];
+        try {
+          const result = await sendBookingReminder(id, { force: true });
+          if (!result.ok) {
+            send.json(res, result.reason === "booking_not_found" ? 404 : 400, {
+              error: result.reason === "not_confirmed"
+                ? "Le rendez-vous doit etre confirme avant d'envoyer un rappel"
+                : "Booking not found",
+            });
+            return;
+          }
+          send.json(res, 200, { ok: true, booking: result.booking });
+        } catch (error) {
+          send.json(res, 500, { error: error instanceof Error ? error.message : "Impossible d'envoyer le rappel" });
+        }
         return;
       }
 

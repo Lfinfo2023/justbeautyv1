@@ -6,7 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { format } from "date-fns";
 import { fr } from "date-fns/locale";
 import { toast } from "sonner";
-import { CheckCircle, ChevronDown, Clock, Trash2, XCircle } from "lucide-react";
+import { CheckCircle, ChevronDown, Clock, Mail, Trash2, XCircle } from "lucide-react";
 import { useMemo, useState } from "react";
 import { getBookingStatusLabel, getServiceLabel } from "@/lib/booking";
 
@@ -68,6 +68,16 @@ const AdminBookings = () => {
     },
     onError: (error: Error) => {
       toast.error(error.message || "Impossible de generer le paiement du solde");
+    },
+  });
+  const sendReminder = useMutation({
+    mutationFn: async (id: string) => api.bookings.sendReminder(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-bookings"] });
+      toast.success("Rappel envoye");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Impossible d'envoyer le rappel");
     },
   });
 
@@ -152,6 +162,9 @@ const AdminBookings = () => {
                 </p>
               )}
               <p>{getBalanceLabel(booking)}</p>
+              {booking.reminder_sent_at && (
+                <p className="text-muted-foreground">Rappel envoye le {format(new Date(booking.reminder_sent_at), "d MMM yyyy HH:mm", { locale: fr })}</p>
+              )}
               {balancePaymentResult[booking.id]?.checkout_url && (
                 <div className="space-y-2">
                   <a href={balancePaymentResult[booking.id].checkout_url} target="_blank" rel="noreferrer" className="inline-block text-primary underline underline-offset-4">
@@ -189,15 +202,27 @@ const AdminBookings = () => {
                 </>
               )}
               {booking.status === "confirmed" && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-8 w-8 p-0 text-yellow-600 hover:text-yellow-700 hover:bg-yellow-50"
-                  onClick={() => updateStatus.mutate({ id: booking.id, status: "pending" })}
-                  title="Remettre en attente"
-                >
-                  <Clock size={16} />
-                </Button>
+                <>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 w-8 p-0 text-primary hover:text-primary hover:bg-primary/10"
+                    onClick={() => sendReminder.mutate(booking.id)}
+                    disabled={sendReminder.isPending}
+                    title="Envoyer le rappel par email"
+                  >
+                    <Mail size={16} />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 w-8 p-0 text-yellow-600 hover:text-yellow-700 hover:bg-yellow-50"
+                    onClick={() => updateStatus.mutate({ id: booking.id, status: "pending" })}
+                    title="Remettre en attente"
+                  >
+                    <Clock size={16} />
+                  </Button>
+                </>
               )}
               {booking.deposit_required && booking.deposit_status !== "paid" && (
                 <Button
@@ -276,6 +301,9 @@ const AdminBookings = () => {
               <p>{booking.deposit_amount?.toFixed(2)} EUR via {booking.deposit_method === "bank_transfer" ? "virement" : "Mollie"}</p>
             )}
             <p>{getBalanceLabel(booking)}</p>
+            {booking.reminder_sent_at && (
+              <p>Rappel envoye le {format(new Date(booking.reminder_sent_at), "d MMM yyyy HH:mm", { locale: fr })}</p>
+            )}
             {balancePaymentResult[booking.id]?.qr_code_url && (
               <div className="pt-2 space-y-2">
                 <img src={balancePaymentResult[booking.id].qr_code_url} alt="QR code de paiement Mollie" className="h-32 w-32 rounded-lg border border-border/50 bg-white p-2" />
@@ -310,14 +338,26 @@ const AdminBookings = () => {
               </>
             )}
             {booking.status === "confirmed" && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-9 px-3 text-yellow-600 hover:text-yellow-700 hover:bg-yellow-50"
-                onClick={() => updateStatus.mutate({ id: booking.id, status: "pending" })}
-              >
-                <Clock size={16} />
-              </Button>
+              <>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-9 px-3 text-primary hover:text-primary hover:bg-primary/10"
+                  onClick={() => sendReminder.mutate(booking.id)}
+                  disabled={sendReminder.isPending}
+                >
+                  <Mail size={16} />
+                  Rappel
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-9 px-3 text-yellow-600 hover:text-yellow-700 hover:bg-yellow-50"
+                  onClick={() => updateStatus.mutate({ id: booking.id, status: "pending" })}
+                >
+                  <Clock size={16} />
+                </Button>
+              </>
             )}
             {booking.deposit_required && booking.deposit_status !== "paid" && (
               <Button

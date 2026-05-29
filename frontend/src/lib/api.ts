@@ -49,6 +49,7 @@ export interface Booking {
   balance_payment_status?: "not_requested" | DepositStatus;
   balance_checkout_url?: string;
   balance_paid_at?: string;
+  reminder_sent_at?: string;
   service_price?: number;
   created_at: string;
   updated_at: string;
@@ -474,6 +475,11 @@ export const api = {
         method: "POST",
         auth: true,
         body: JSON.stringify({ send_email }),
+      }),
+    sendReminder: (id: string) =>
+      request<{ ok: true; booking: Booking }>(`/api/admin/bookings/${id}/reminder`, {
+        method: "POST",
+        auth: true,
       }),
     remove: (id: string) =>
       request<void>(`/api/admin/bookings/${id}`, {
