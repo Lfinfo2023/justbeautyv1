@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { fr } from "date-fns/locale";
-import { CalendarDays, ChevronDown, Clock3, Lock, RotateCcw, Save, Unlock } from "lucide-react";
+import { CalendarCheck, CalendarDays, ChevronDown, Clock3, Lock, RotateCcw, Save, Unlock } from "lucide-react";
 import { api, type WeeklyScheduleDay } from "@/lib/api";
 import { Calendar } from "@/components/ui/calendar";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,10 @@ const AdminAvailabilitySettings = () => {
   const { data: overrides } = useQuery({
     queryKey: ["admin-availability"],
     queryFn: api.availability.listAdmin,
+  });
+  const { data: googleCalendarStatus } = useQuery({
+    queryKey: ["google-calendar-status"],
+    queryFn: api.bookings.googleCalendarStatus,
   });
 
   useEffect(() => {
@@ -149,6 +153,23 @@ const AdminAvailabilitySettings = () => {
         <p className="text-sm text-muted-foreground mt-1">
           Gérez l'horaire hebdomadaire, les exceptions par date et les créneaux précis.
         </p>
+      </div>
+
+      <div className="bg-card rounded-2xl border border-border/50 p-6 space-y-2">
+        <div className="flex items-center gap-3">
+          <CalendarCheck size={20} className="text-rose-gold" />
+          <div>
+            <h4 className="font-medium text-foreground">Google Calendar</h4>
+            <p className="text-sm text-muted-foreground">
+              {googleCalendarStatus?.enabled
+                ? "Connecté : toute journée contenant un événement Google est automatiquement fermée aux réservations."
+                : "Non configuré : ajoutez les identifiants du compte de service dans le fichier .env du serveur."}
+            </p>
+          </div>
+        </div>
+        {googleCalendarStatus?.enabled && googleCalendarStatus.fail_closed && (
+          <p className="text-xs text-muted-foreground">Par sécurité, les réservations sont aussi bloquées si Google Calendar est momentanément inaccessible.</p>
+        )}
       </div>
 
       <div className="bg-card rounded-2xl border border-border/50 p-6 space-y-4">

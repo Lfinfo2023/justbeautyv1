@@ -39,6 +39,11 @@ const defaultEnv = {
   CALDAV_PASSWORD: "",
   CALDAV_CALENDAR_PATH: "",
   CALDAV_TIMEZONE: "Europe/Brussels",
+  GOOGLE_CALENDAR_ID: "",
+  GOOGLE_SERVICE_ACCOUNT_EMAIL: "",
+  GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: "",
+  GOOGLE_CALENDAR_TIMEZONE: "Europe/Brussels",
+  GOOGLE_CALENDAR_FAIL_CLOSED: "true",
   MOLLIE_API_KEY: "",
   LOYALTY_POINTS_PER_EURO: "1",
   PROTECTION_ENABLED: "true",
@@ -1261,6 +1266,109 @@ const createCalDavClient = (env) => {
   };
 };
 
+// Google Calendar is consulted only by the server.  A service account is used so
+// no administrator token or private calendar data is ever exposed to visitors.
+const createGoogleCalendarClient = (env) => {
+  const calendarId = String(env.GOOGLE_CALENDAR_ID || "").trim();
+  const clientEmail = String(env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "").trim();
+  const privateKey = String(env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n").trim();
+  const timeZone = String(env.GOOGLE_CALENDAR_TIMEZONE || env.CALDAV_TIMEZONE || "Europe/Brussels").trim();
+  const failClosed = envToBoolean(env.GOOGLE_CALENDAR_FAIL_CLOSED, true);
+  const cache = new Map();
+  let token = null;
+
+  if (!calendarId || !clientEmail || !privateKey) {
+    return {
+      enabled: false,
+      failClosed,
+      async isDateBlocked() { return { blocked: false, reason: "not_configured" }; },
+    };
+  }
+
+  const base64Url = (value) => Buffer.from(value).toString("base64url");
+  const getAccessToken = async () => {
+    if (token?.value && token.expiresAt > Date.now() + 60_000) return token.value;
+    const now = Math.floor(Date.now() / 1000);
+    const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+    const claim = base64Url(JSON.stringify({
+      iss: clientEmail,
+      scope: "https://www.googleapis.com/auth/calendar.freebusy",
+      aud: "https://oauth2.googleapis.com/token",
+      iat: now,
+      exp: now + 3600,
+    }));
+    const unsigned = `${header}.${claim}`;
+    const signature = crypto.createSign("RSA-SHA256").update(unsigned).end().sign(privateKey).toString("base64url");
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion: `${unsigned}.${signature}`,
+      }),
+    });
+    if (!response.ok) throw new Error(`Google OAuth failed (${response.status})`);
+    const payload = await response.json();
+    token = { value: payload.access_token, expiresAt: Date.now() + Number(payload.expires_in || 3600) * 1000 };
+    return token.value;
+  };
+
+  // Converts a wall-clock time in the configured calendar zone to UTC, including DST.
+  const zonedIso = (date, time) => {
+    const [year, month, day] = date.split("-").map(Number);
+    const [hour, minute] = time.split(":").map(Number);
+    const target = Date.UTC(year, month - 1, day, hour, minute);
+    let guess = target;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+        timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+      }).formatToParts(new Date(guess)).map((part) => [part.type, part.value]));
+      const observed = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute));
+      guess += target - observed;
+    }
+    return new Date(guess).toISOString();
+  };
+  const nextDate = (date) => {
+    const value = new Date(`${date}T12:00:00Z`);
+    value.setUTCDate(value.getUTCDate() + 1);
+    return value.toISOString().slice(0, 10);
+  };
+
+  return {
+    enabled: true,
+    failClosed,
+    async isDateBlocked(date, { force = false } = {}) {
+      const cached = cache.get(date);
+      if (!force && cached && cached.expiresAt > Date.now()) return cached.result;
+      try {
+        const accessToken = await getAccessToken();
+        const response = await fetch("https://www.googleapis.com/calendar/v3/freeBusy", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            timeMin: zonedIso(date, "00:00"),
+            timeMax: zonedIso(nextDate(date), "00:00"),
+            timeZone,
+            items: [{ id: calendarId }],
+          }),
+        });
+        if (!response.ok) throw new Error(`Google Calendar freeBusy failed (${response.status})`);
+        const payload = await response.json();
+        const calendar = payload?.calendars?.[calendarId];
+        if (calendar?.errors?.length) throw new Error("Google Calendar returned an access error");
+        const result = { blocked: Array.isArray(calendar?.busy) && calendar.busy.length > 0, reason: "calendar" };
+        cache.set(date, { result, expiresAt: Date.now() + 5 * 60_000 });
+        return result;
+      } catch (error) {
+        console.warn("Google Calendar availability check failed:", error instanceof Error ? error.message : error);
+        const result = { blocked: failClosed, reason: "unavailable" };
+        cache.set(date, { result, expiresAt: Date.now() + 60_000 });
+        return result;
+      }
+    },
+  };
+};
+
 const createMollieClient = (apiKey) => {
   const normalizedApiKey = String(apiKey || "").trim();
   const apiBaseUrl = "https://api.mollie.com/v2";
@@ -1896,6 +2004,7 @@ const createApp = async () => {
   const mailer = await createMailer(env);
   const telegramNotifier = createTelegramNotifier(env);
   const calDav = createCalDavClient(env);
+  const googleCalendar = createGoogleCalendarClient(env);
   const publicBaseUrl = env.PUBLIC_BASE_URL.replace(/\/$/, "");
   const apiPublicBaseUrl = String(env.API_PUBLIC_BASE_URL || env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
   const protectionConfig = getProtectionConfig(env);
@@ -2816,6 +2925,11 @@ const createApp = async () => {
     synced_events: Number(db.prepare("SELECT COUNT(*) AS count FROM booking_calendar_events").get()?.count || 0),
     confirmed_bookings: Number(db.prepare("SELECT COUNT(*) AS count FROM bookings WHERE status = 'confirmed'").get()?.count || 0),
   });
+  const getGoogleCalendarStatus = () => ({
+    enabled: googleCalendar.enabled,
+    fail_closed: googleCalendar.failClosed,
+    calendar_id_configured: Boolean(String(env.GOOGLE_CALENDAR_ID || "").trim()),
+  });
   const createCustomerSession = (customerId) => {
     const token = createSessionToken(env.SESSION_SECRET);
     const now = new Date();
@@ -3617,6 +3731,12 @@ const createApp = async () => {
         return;
       }
 
+      if (pathname === "/api/admin/google-calendar/status" && req.method === "GET") {
+        if (!requireAdmin(req, res)) return;
+        send.json(res, 200, getGoogleCalendarStatus());
+        return;
+      }
+
       if (pathname === "/api/admin/payment-settings" && req.method === "GET") {
         if (!requireAdmin(req, res)) return;
         send.json(res, 200, getPaymentSettings({ includeSecrets: true }));
@@ -3905,6 +4025,12 @@ const createApp = async () => {
           return;
         }
 
+        const googleStatus = await googleCalendar.isDateBlocked(date);
+        if (googleStatus.blocked) {
+          send.json(res, 200, { date, service_id: serviceId, slots: [], has_available: false });
+          return;
+        }
+
         const slots = APPOINTMENT_TIME_SLOTS.filter((slot) =>
           isTimeSlotAvailable(date, slot, Number(service.duration_minutes || DEFAULT_SERVICE_DURATION_MINUTES)));
 
@@ -4004,6 +4130,14 @@ const createApp = async () => {
 
         if (!isTimeSlotAvailable(bookingDate, bookingTime, service.duration_minutes)) {
           send.json(res, 400, { error: "Ce creneau n'est pas disponible" });
+          return;
+        }
+
+        // A forced fresh check closes the small gap between displaying a slot and
+        // submitting the form (or an admin adding an event meanwhile).
+        const googleStatus = await googleCalendar.isDateBlocked(bookingDate, { force: true });
+        if (googleStatus.blocked) {
+          send.json(res, 400, { error: "Cette journee n'est plus disponible" });
           return;
         }
 

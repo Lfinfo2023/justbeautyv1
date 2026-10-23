@@ -169,6 +169,12 @@ export interface CalDavStatus {
   confirmed_bookings: number;
 }
 
+export interface GoogleCalendarStatus {
+  enabled: boolean;
+  fail_closed: boolean;
+  calendar_id_configured: boolean;
+}
+
 export interface PaymentSettings {
   enabled: boolean;
   deposit_rate: number;
@@ -492,6 +498,7 @@ export const api = {
         auth: true,
       }),
     caldavStatus: () => request<CalDavStatus>("/api/admin/caldav/status", { auth: true }),
+    googleCalendarStatus: () => request<GoogleCalendarStatus>("/api/admin/google-calendar/status", { auth: true }),
   },
   paymentSettings: {
     getPublic: () =>

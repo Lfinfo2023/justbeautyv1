@@ -18,7 +18,27 @@ Set or verify these values in `backend/.env`:
 - `CORS_ORIGIN=https://just-beauty.be,https://www.just-beauty.be`
 - `SMTP_*` configured with the production mailbox
 - `CALDAV_*` configured with the production calendar
+- `GOOGLE_CALENDAR_*` configured when Google Calendar must close days automatically
 - `MOLLIE_API_KEY=` with the live or test key to use
+
+## Google Calendar: fermer automatiquement les journées occupées
+
+Cette intégration lit uniquement les disponibilités du calendrier : les visiteurs ne reçoivent jamais l'accès à Google ni le détail des événements. Dès qu'un événement est présent, même court, la journée entière est retirée des réservations. Le contrôle est refait lors de l'envoi de la réservation.
+
+1. Dans Google Cloud Console, créez un projet puis un **compte de service** et générez une clé JSON.
+2. Activez l'API **Google Calendar API** pour ce projet.
+3. Dans Google Calendar, partagez le calendrier de l'admin avec l'adresse e-mail du compte de service, avec le droit **Afficher tous les détails des événements** (le droit "Voir uniquement libre/occupé" peut aussi suffire selon la configuration Google).
+4. Relevez l'ID du calendrier dans ses paramètres (souvent l'adresse Gmail pour le calendrier principal), puis ajoutez ces valeurs à `backend/.env` :
+
+```env
+GOOGLE_CALENDAR_ID=adresse-ou-id-du-calendrier@group.calendar.google.com
+GOOGLE_SERVICE_ACCOUNT_EMAIL=nom-du-compte@votre-projet.iam.gserviceaccount.com
+GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+GOOGLE_CALENDAR_TIMEZONE=Europe/Brussels
+GOOGLE_CALENDAR_FAIL_CLOSED=true
+```
+
+`GOOGLE_CALENDAR_FAIL_CLOSED=true` est recommandé : si Google est indisponible, la journée ne peut pas être réservée par erreur. Redémarrez ensuite le backend. L'état de connexion est visible dans Administration → Paramètres → Horaires d'ouverture.
 
 ## Reverse Proxy
 
