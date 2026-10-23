@@ -1,4 +1,4 @@
-const CACHE_NAME = "justbeauty-pwa-v1";
+const CACHE_NAME = "justbeauty-pwa-v2";
 const OFFLINE_FALLBACK = ["/", "/manifest.webmanifest", "/logo.jpg", "/favicon.ico"];
 
 self.addEventListener("install", (event) => {
