@@ -2420,12 +2420,17 @@ const createApp = async () => {
     return response.status === 204 || response.status === 404 ? null : response.json();
   };
   const syncGoogleBookingCalendar = async (snapshot) => {
-    if (!snapshot || !decryptGoogleTokens()?.refresh_token) return;
+    if (!snapshot) return;
+    if (!decryptGoogleTokens()?.refresh_token) {
+      console.warn("Google Calendar sync skipped: OAuth is not connected", { bookingId: snapshot.booking.id });
+      return;
+    }
     const existing = getGoogleBookingEvent(snapshot.booking.id);
     if (snapshot.booking.status !== "confirmed") {
       if (existing) {
         await googleCalendarRequest(`/calendars/primary/events/${encodeURIComponent(existing.event_id)}`, { method: "DELETE" });
         db.prepare("DELETE FROM google_booking_events WHERE booking_id = ?").run(snapshot.booking.id);
+        console.log("Google Calendar booking event deleted", { bookingId: snapshot.booking.id, eventId: existing.event_id });
       }
       return;
     }
@@ -2443,7 +2448,10 @@ const createApp = async () => {
       existing ? `/calendars/primary/events/${encodeURIComponent(existing.event_id)}` : "/calendars/primary/events",
       { method: existing ? "PUT" : "POST", body: payload },
     );
-    if (event?.id) saveGoogleBookingEvent(snapshot.booking.id, event.id);
+    if (event?.id) {
+      saveGoogleBookingEvent(snapshot.booking.id, event.id);
+      console.log("Google Calendar booking event synced", { bookingId: snapshot.booking.id, eventId: event.id, action: existing ? "updated" : "created" });
+    }
   };
   const syncBookingCalendar = async (snapshot) => {
     if (!snapshot) return;
@@ -2473,6 +2481,7 @@ const createApp = async () => {
         }
       } catch (error) {
         errors.push(`booking ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+        console.warn("Calendar sync failed for booking", row.id, error instanceof Error ? error.message : error);
       }
     }
 
