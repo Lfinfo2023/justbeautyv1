@@ -129,9 +129,9 @@ const AdminCalendar = () => {
             <h4 className="font-medium text-foreground">Agenda Google</h4>
             <p className="text-sm text-muted-foreground mt-1">Événements réels du compte Google connecté pour le jour sélectionné.</p>
           </div>
-          {!googleCalendarStatus?.oauth_connected && googleCalendarStatus?.oauth_configured && (
-            <Button type="button" className="rounded-full gap-2" onClick={() => connectGoogleCalendar.mutate()} disabled={connectGoogleCalendar.isPending}>
-              <Link2 size={16} /> {connectGoogleCalendar.isPending ? "Ouverture..." : "Connecter Google Calendar"}
+          {googleCalendarStatus?.oauth_configured && (
+            <Button type="button" variant={googleCalendarStatus.oauth_connected ? "outline" : "default"} className="rounded-full gap-2" onClick={() => connectGoogleCalendar.mutate()} disabled={connectGoogleCalendar.isPending}>
+              <Link2 size={16} /> {connectGoogleCalendar.isPending ? "Ouverture..." : googleCalendarStatus.oauth_connected ? "Reconnecter Google Calendar" : "Connecter Google Calendar"}
             </Button>
           )}
         </div>

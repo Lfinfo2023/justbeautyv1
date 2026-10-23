@@ -2416,7 +2416,10 @@ const createApp = async () => {
       headers: { Authorization: `Bearer ${accessToken}`, ...(body ? { "Content-Type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!response.ok && response.status !== 404) throw new Error(`Google Calendar ${method} failed (${response.status})`);
+    if (!response.ok && response.status !== 404) {
+      const details = (await response.text()).slice(0, 500);
+      throw new Error(`Google Calendar ${method} failed (${response.status}): ${details}`);
+    }
     return response.status === 204 || response.status === 404 ? null : response.json();
   };
   const syncGoogleBookingCalendar = async (snapshot) => {
