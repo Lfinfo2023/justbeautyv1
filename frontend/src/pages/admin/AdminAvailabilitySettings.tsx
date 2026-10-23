@@ -161,9 +161,11 @@ const AdminAvailabilitySettings = () => {
           <div>
             <h4 className="font-medium text-foreground">Google Calendar</h4>
             <p className="text-sm text-muted-foreground">
-              {googleCalendarStatus?.enabled
+              {googleCalendarStatus?.oauth_connected
                 ? "Connecté : toute journée contenant un événement Google est automatiquement fermée aux réservations."
-                : "Non configuré : ajoutez les identifiants du compte de service dans le fichier .env du serveur."}
+                : googleCalendarStatus?.oauth_configured
+                  ? "OAuth est prêt. Ouvrez l’onglet Calendrier puis cliquez sur « Connecter Google Calendar »."
+                  : `OAuth incomplet : ajoutez ${googleCalendarStatus?.oauth_missing?.join(", ") || "les identifiants OAuth"} dans le fichier .env du serveur.`}
             </p>
           </div>
         </div>
