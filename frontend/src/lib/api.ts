@@ -171,9 +171,15 @@ export interface CalDavStatus {
 
 export interface GoogleCalendarStatus {
   enabled: boolean;
+  oauth_configured: boolean;
+  oauth_connected: boolean;
+  oauth_missing: string[];
+  oauth_redirect_uri: string;
   fail_closed: boolean;
   calendar_id_configured: boolean;
 }
+
+export interface GoogleCalendarEvent { id: string; summary: string; start: string; end: string; all_day: boolean; }
 
 export interface PaymentSettings {
   enabled: boolean;
@@ -499,6 +505,8 @@ export const api = {
       }),
     caldavStatus: () => request<CalDavStatus>("/api/admin/caldav/status", { auth: true }),
     googleCalendarStatus: () => request<GoogleCalendarStatus>("/api/admin/google-calendar/status", { auth: true }),
+    startGoogleCalendarOAuth: () => request<{ authorization_url: string }>("/api/admin/google-calendar/oauth/start", { method: "POST", auth: true }),
+    googleCalendarEvents: (date: string) => request<{ date: string; events: GoogleCalendarEvent[] }>(`/api/admin/google-calendar/events?date=${encodeURIComponent(date)}`, { auth: true }),
   },
   paymentSettings: {
     getPublic: () =>

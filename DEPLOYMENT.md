@@ -19,7 +19,6 @@ Set or verify these values in `backend/.env`:
 - `SMTP_*` configured with the production mailbox
 - `CALDAV_*` configured with the production calendar
 - `GOOGLE_CALENDAR_*` configured when Google Calendar must close days automatically
-- `MOLLIE_API_KEY=` with the live or test key to use
 
 ## Google Calendar: fermer automatiquement les journées occupées
 
@@ -36,9 +35,17 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL=nom-du-compte@votre-projet.iam.gserviceaccount.com
 GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 GOOGLE_CALENDAR_TIMEZONE=Europe/Brussels
 GOOGLE_CALENDAR_FAIL_CLOSED=true
+GOOGLE_OAUTH_CLIENT_ID=votre-client-id.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=votre-client-secret
+# Doit être identique à l'URI de redirection déclarée dans Google Cloud.
+GOOGLE_OAUTH_REDIRECT_URI=https://just-beauty.be/api/admin/google-calendar/oauth/callback
 ```
 
-`GOOGLE_CALENDAR_FAIL_CLOSED=true` est recommandé : si Google est indisponible, la journée ne peut pas être réservée par erreur. Redémarrez ensuite le backend. L'état de connexion est visible dans Administration → Paramètres → Horaires d'ouverture.
+`GOOGLE_CALENDAR_FAIL_CLOSED=true` est recommandé : si Google est indisponible, la journée ne peut pas être réservée par erreur. Pour la connexion directe, créez aussi dans Google Cloud des identifiants OAuth de type **Application Web**, activez Google Calendar API et ajoutez exactement l'URL `GOOGLE_OAUTH_REDIRECT_URI` dans les URI de redirection autorisées. Après redémarrage, l'admin clique sur « Connecter Google Calendar » dans Administration → Calendrier. Les jetons de reconnexion sont chiffrés côté serveur ; les événements réels ne sont affichés qu'après cette connexion.
+
+## Paiements Mollie
+
+Les paiements Mollie et les acomptes en ligne sont désactivés dans l'application. Les nouvelles réservations sont créées sans redirection de paiement. Retirez également les clés `MOLLIE_API_KEY` du fichier `backend/.env` si elles y figurent encore.
 
 ## Reverse Proxy
 

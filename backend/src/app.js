@@ -44,6 +44,10 @@ const defaultEnv = {
   GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: "",
   GOOGLE_CALENDAR_TIMEZONE: "Europe/Brussels",
   GOOGLE_CALENDAR_FAIL_CLOSED: "true",
+  GOOGLE_CALENDAR_EMBED_URL: "",
+  GOOGLE_OAUTH_CLIENT_ID: "",
+  GOOGLE_OAUTH_CLIENT_SECRET: "",
+  GOOGLE_OAUTH_REDIRECT_URI: "",
   MOLLIE_API_KEY: "",
   LOYALTY_POINTS_PER_EURO: "1",
   PROTECTION_ENABLED: "true",
@@ -769,6 +773,11 @@ const bootstrapDb = (db, env) => {
       etag TEXT NOT NULL DEFAULT '',
       synced_at TEXT NOT NULL,
       FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS google_calendar_oauth_states (
+      state TEXT PRIMARY KEY,
+      admin_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS loyalty_transactions (
       id TEXT PRIMARY KEY,
@@ -2581,6 +2590,69 @@ const createApp = async () => {
     const row = db.prepare("SELECT value FROM site_content WHERE key = ?").get(key);
     return row ? String(row.value ?? fallback) : fallback;
   };
+  const googleOauthConfig = () => ({
+    clientId: String(env.GOOGLE_OAUTH_CLIENT_ID || "").trim(),
+    clientSecret: String(env.GOOGLE_OAUTH_CLIENT_SECRET || "").trim(),
+    redirectUri: String(env.GOOGLE_OAUTH_REDIRECT_URI || `${apiPublicBaseUrl}/api/admin/google-calendar/oauth/callback`).trim(),
+  });
+  const googleTokenCipherKey = crypto.createHash("sha256").update(`${env.SESSION_SECRET}:google-calendar-oauth`).digest();
+  const encryptGoogleTokens = (tokens) => {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", googleTokenCipherKey, iv);
+    const encrypted = Buffer.concat([cipher.update(JSON.stringify(tokens), "utf8"), cipher.final()]);
+    return `${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${encrypted.toString("base64url")}`;
+  };
+  const decryptGoogleTokens = () => {
+    const value = getContentValue("google_oauth_tokens", "");
+    if (!value) return null;
+    try {
+      const [ivValue, tagValue, encryptedValue] = value.split(".");
+      const decipher = crypto.createDecipheriv("aes-256-gcm", googleTokenCipherKey, Buffer.from(ivValue, "base64url"));
+      decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+      return JSON.parse(Buffer.concat([decipher.update(Buffer.from(encryptedValue, "base64url")), decipher.final()]).toString("utf8"));
+    } catch {
+      return null;
+    }
+  };
+  const saveGoogleTokens = (tokens) => db.prepare(`
+    INSERT INTO site_content (id, key, value, updated_at) VALUES (?, 'google_oauth_tokens', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `).run(crypto.randomUUID(), encryptGoogleTokens(tokens), new Date().toISOString());
+  const getGoogleOAuthAccessToken = async () => {
+    const config = googleOauthConfig();
+    const tokens = decryptGoogleTokens();
+    if (!config.clientId || !config.clientSecret || !tokens?.refresh_token) return null;
+    if (tokens.access_token && Number(tokens.expires_at || 0) > Date.now() + 60_000) return tokens.access_token;
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, refresh_token: tokens.refresh_token, grant_type: "refresh_token" }),
+    });
+    if (!response.ok) throw new Error("La connexion Google Calendar a expire ou a ete revoquee");
+    const refreshed = await response.json();
+    const next = { ...tokens, access_token: refreshed.access_token, expires_at: Date.now() + Number(refreshed.expires_in || 3600) * 1000 };
+    saveGoogleTokens(next);
+    return next.access_token;
+  };
+  const getGoogleCalendarEvents = async (date) => {
+    const accessToken = await getGoogleOAuthAccessToken();
+    if (!accessToken) return null;
+    const next = new Date(`${date}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
+    const params = new URLSearchParams({ timeMin: `${date}T00:00:00Z`, timeMax: `${next.toISOString().slice(0, 10)}T00:00:00Z`, singleEvents: "true", orderBy: "startTime", timeZone: env.GOOGLE_CALENDAR_TIMEZONE || "Europe/Brussels" });
+    const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!response.ok) throw new Error(`Google Calendar events failed (${response.status})`);
+    const payload = await response.json();
+    return (payload.items || []).filter((event) => event.status !== "cancelled").map((event) => ({ id: event.id, summary: event.summary || "Occupation", start: event.start?.dateTime || event.start?.date || "", end: event.end?.dateTime || event.end?.date || "", all_day: Boolean(event.start?.date) }));
+  };
+  const isGoogleDateBlocked = async (date, options) => {
+    try {
+      const events = await getGoogleCalendarEvents(date);
+      if (events) return { blocked: events.length > 0, reason: "oauth" };
+    } catch (error) {
+      console.warn("Google OAuth calendar check failed:", error instanceof Error ? error.message : error);
+      return { blocked: true, reason: "unavailable" };
+    }
+    return googleCalendar.isDateBlocked(date, options);
+  };
   const getMollieMode = () => {
     const mode = String(getContentValue("payment_mollie_mode", "test")).trim().toLowerCase();
     return mode === "live" ? "live" : "test";
@@ -2606,7 +2678,9 @@ const createApp = async () => {
     return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
   };
   const getPaymentSettings = ({ includeSecrets = false } = {}) => {
-    const enabled = parseBooleanSetting(getContentValue("payments_enabled", "0"), false);
+    // Online payment has been retired. Keep historical fields in the database,
+    // but never expose or activate Mollie for a new reservation.
+    const enabled = false;
     const depositRate = Math.max(0, Number(getContentValue("payment_deposit_rate", "10")) || 10);
     const depositThreshold = Math.max(0, Number(getContentValue("payment_deposit_threshold", "20")) || 20);
     const allowBankTransfer = parseBooleanSetting(getContentValue("payment_allow_bank_transfer", "1"), true);
@@ -2616,7 +2690,7 @@ const createApp = async () => {
     const mollieMode = getMollieMode();
     const mollieTestApiKey = getMollieApiKey("test");
     const mollieLiveApiKey = getMollieApiKey("live");
-    const selectedMollieApiKey = getMollieApiKey(mollieMode);
+    const selectedMollieApiKey = "";
 
     return {
       enabled,
@@ -2627,14 +2701,14 @@ const createApp = async () => {
       bank_name: bankName,
       bank_reference_prefix: bankReferencePrefix,
       mollie_mode: mollieMode,
-      mollie_enabled: Boolean(selectedMollieApiKey),
-      mollie_test_api_configured: Boolean(mollieTestApiKey),
-      mollie_live_api_configured: Boolean(mollieLiveApiKey),
+      mollie_enabled: false,
+      mollie_test_api_configured: false,
+      mollie_live_api_configured: false,
       ...(includeSecrets ? {
-        mollie_api_configured: Boolean(selectedMollieApiKey),
-        mollie_api_key: selectedMollieApiKey,
-        mollie_test_api_key: mollieTestApiKey,
-        mollie_live_api_key: mollieLiveApiKey,
+        mollie_api_configured: false,
+        mollie_api_key: "",
+        mollie_test_api_key: "",
+        mollie_live_api_key: "",
       } : {}),
     };
   };
@@ -2646,8 +2720,8 @@ const createApp = async () => {
     const settings = getPaymentSettings();
     const servicePrice = Number(service?.price || 0);
     const isTrusted = Boolean(customer?.trusted_no_deposit);
-    const depositRequired = settings.enabled && servicePrice > settings.deposit_threshold && !isTrusted;
-    const rawAmount = servicePrice * (settings.deposit_rate / 100);
+    const depositRequired = false;
+    const rawAmount = 0;
 
     return {
       enabled: settings.enabled,
@@ -2925,11 +2999,24 @@ const createApp = async () => {
     synced_events: Number(db.prepare("SELECT COUNT(*) AS count FROM booking_calendar_events").get()?.count || 0),
     confirmed_bookings: Number(db.prepare("SELECT COUNT(*) AS count FROM bookings WHERE status = 'confirmed'").get()?.count || 0),
   });
-  const getGoogleCalendarStatus = () => ({
-    enabled: googleCalendar.enabled,
-    fail_closed: googleCalendar.failClosed,
-    calendar_id_configured: Boolean(String(env.GOOGLE_CALENDAR_ID || "").trim()),
-  });
+  const getGoogleCalendarStatus = () => {
+    const oauth = googleOauthConfig();
+    const oauthMissing = [
+      !oauth.clientId && "GOOGLE_OAUTH_CLIENT_ID",
+      !oauth.clientSecret && "GOOGLE_OAUTH_CLIENT_SECRET",
+      !oauth.redirectUri && "GOOGLE_OAUTH_REDIRECT_URI",
+    ].filter(Boolean);
+    const oauthConnected = Boolean(decryptGoogleTokens()?.refresh_token);
+    return {
+      enabled: oauthConnected || googleCalendar.enabled,
+      oauth_configured: oauthMissing.length === 0,
+      oauth_connected: oauthConnected,
+      oauth_missing: oauthMissing,
+      oauth_redirect_uri: oauth.redirectUri,
+      fail_closed: googleCalendar.failClosed,
+      calendar_id_configured: Boolean(String(env.GOOGLE_CALENDAR_ID || "").trim()),
+    };
+  };
   const createCustomerSession = (customerId) => {
     const token = createSessionToken(env.SESSION_SECRET);
     const now = new Date();
@@ -3420,6 +3507,8 @@ const createApp = async () => {
       }
 
       if (pathname === "/api/payments/mollie/webhook" && req.method === "POST") {
+        send.json(res, 410, { error: "Les paiements Mollie sont desactives" });
+        return;
         const rawBody = await readTextBody(req);
         const params = new URLSearchParams(rawBody);
         const paymentId = params.get("id") || "";
@@ -3737,6 +3826,74 @@ const createApp = async () => {
         return;
       }
 
+      if (pathname === "/api/admin/google-calendar/oauth/start" && req.method === "POST") {
+        const admin = requireAdmin(req, res);
+        if (!admin) return;
+        const config = googleOauthConfig();
+        if (!config.clientId || !config.clientSecret) {
+          send.json(res, 400, { error: "Google OAuth n'est pas configure sur le serveur" });
+          return;
+        }
+        const state = crypto.randomBytes(32).toString("base64url");
+        db.prepare("DELETE FROM google_calendar_oauth_states WHERE expires_at < ?").run(new Date().toISOString());
+        db.prepare("INSERT INTO google_calendar_oauth_states (state, admin_id, expires_at) VALUES (?, ?, ?)")
+          .run(state, admin.id, new Date(Date.now() + 10 * 60_000).toISOString());
+        const authorizationUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+        authorizationUrl.search = new URLSearchParams({
+          client_id: config.clientId,
+          redirect_uri: config.redirectUri,
+          response_type: "code",
+          scope: "https://www.googleapis.com/auth/calendar.readonly",
+          access_type: "offline",
+          prompt: "consent",
+          state,
+        }).toString();
+        send.json(res, 200, { authorization_url: authorizationUrl.toString() });
+        return;
+      }
+
+      if (pathname === "/api/admin/google-calendar/oauth/callback" && req.method === "GET") {
+        const state = String(url.searchParams.get("state") || "");
+        const code = String(url.searchParams.get("code") || "");
+        const storedState = db.prepare("SELECT * FROM google_calendar_oauth_states WHERE state = ?").get(state);
+        db.prepare("DELETE FROM google_calendar_oauth_states WHERE state = ?").run(state);
+        const redirect = `${publicBaseUrl}/admin`;
+        if (!storedState || Date.parse(storedState.expires_at) < Date.now() || !code) {
+          send.html(res, 400, `<!doctype html><meta charset="utf-8"><script>location.replace(${JSON.stringify(`${redirect}?google=error`)})</script>`);
+          return;
+        }
+        try {
+          const config = googleOauthConfig();
+          const response = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ code, client_id: config.clientId, client_secret: config.clientSecret, redirect_uri: config.redirectUri, grant_type: "authorization_code" }),
+          });
+          if (!response.ok) throw new Error("Google OAuth token exchange failed");
+          const tokens = await response.json();
+          if (!tokens.refresh_token) throw new Error("Google n'a pas fourni de jeton de reconnexion");
+          saveGoogleTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires_at: Date.now() + Number(tokens.expires_in || 3600) * 1000 });
+          send.html(res, 200, `<!doctype html><meta charset="utf-8"><script>location.replace(${JSON.stringify(`${redirect}?google=connected`)})</script>`);
+        } catch (error) {
+          console.warn("Google OAuth callback failed:", error instanceof Error ? error.message : error);
+          send.html(res, 400, `<!doctype html><meta charset="utf-8"><script>location.replace(${JSON.stringify(`${redirect}?google=error`)})</script>`);
+        }
+        return;
+      }
+
+      if (pathname === "/api/admin/google-calendar/events" && req.method === "GET") {
+        if (!requireAdmin(req, res)) return;
+        const date = normalizeDate(url.searchParams.get("date") || "");
+        if (!date) { send.json(res, 400, { error: "Date invalide" }); return; }
+        try {
+          const events = await getGoogleCalendarEvents(date);
+          if (!events) { send.json(res, 409, { error: "Google Calendar n'est pas connecte" }); return; }
+          send.json(res, 200, { date, events });
+        } catch (error) {
+          send.json(res, 502, { error: error instanceof Error ? error.message : "Impossible de lire Google Calendar" });
+        }
+        return;
+      }
+
       if (pathname === "/api/admin/payment-settings" && req.method === "GET") {
         if (!requireAdmin(req, res)) return;
         send.json(res, 200, getPaymentSettings({ includeSecrets: true }));
@@ -3745,23 +3902,11 @@ const createApp = async () => {
 
       if (pathname === "/api/admin/payment-settings" && req.method === "PUT") {
         if (!requireAdmin(req, res)) return;
-        const body = await readBody(req);
         const values = {
-          payments_enabled: body.enabled ? "1" : "0",
-          payment_deposit_rate: String(body.deposit_rate ?? getPaymentSettings().deposit_rate),
-          payment_deposit_threshold: String(body.deposit_threshold ?? getPaymentSettings().deposit_threshold),
-          payment_allow_bank_transfer: body.allow_bank_transfer === false ? "0" : "1",
-          payment_bank_account: String(body.bank_account ?? ""),
-          payment_bank_name: String(body.bank_name ?? "Just Beauty"),
-          payment_bank_reference_prefix: String(body.bank_reference_prefix ?? "ACOMPTE"),
-          payment_mollie_mode: body.mollie_mode === "live" ? "live" : "test",
-          payment_mollie_test_api_key: String(body.mollie_test_api_key ?? getMollieApiKey("test")),
-          payment_mollie_live_api_key: String(body.mollie_live_api_key ?? getMollieApiKey("live")),
-          payment_mollie_api_key: String(
-            body.mollie_mode === "live"
-              ? (body.mollie_live_api_key ?? getMollieApiKey("live"))
-              : (body.mollie_test_api_key ?? getMollieApiKey("test")),
-          ),
+          payments_enabled: "0",
+          payment_mollie_api_key: "",
+          payment_mollie_test_api_key: "",
+          payment_mollie_live_api_key: "",
         };
         const now = new Date().toISOString();
         const upsert = db.prepare(`
@@ -3777,20 +3922,7 @@ const createApp = async () => {
 
       if (pathname === "/api/admin/payment-settings/test-mollie" && req.method === "POST") {
         if (!requireAdmin(req, res)) return;
-        const body = await readBody(req);
-        const requestedMode = body.mollie_mode === "live" ? "live" : "test";
-        const apiKey = String(
-          body.mollie_api_key
-            ?? (requestedMode === "live" ? body.mollie_live_api_key : body.mollie_test_api_key)
-            ?? getMollieApiKey(requestedMode),
-        ).trim();
-        const mollieClient = createMollieClient(apiKey);
-        if (!mollieClient.enabled) {
-          send.json(res, 400, { error: "Cle API Mollie manquante" });
-          return;
-        }
-        const result = await mollieClient.testConnection();
-        send.json(res, 200, { ...result, mode: requestedMode });
+        send.json(res, 410, { error: "Les paiements Mollie sont desactives" });
         return;
       }
 
@@ -4025,7 +4157,7 @@ const createApp = async () => {
           return;
         }
 
-        const googleStatus = await googleCalendar.isDateBlocked(date);
+        const googleStatus = await isGoogleDateBlocked(date);
         if (googleStatus.blocked) {
           send.json(res, 200, { date, service_id: serviceId, slots: [], has_available: false });
           return;
@@ -4135,7 +4267,7 @@ const createApp = async () => {
 
         // A forced fresh check closes the small gap between displaying a slot and
         // submitting the form (or an admin adding an event meanwhile).
-        const googleStatus = await googleCalendar.isDateBlocked(bookingDate, { force: true });
+        const googleStatus = await isGoogleDateBlocked(bookingDate, { force: true });
         if (googleStatus.blocked) {
           send.json(res, 400, { error: "Cette journee n'est plus disponible" });
           return;
@@ -4608,28 +4740,7 @@ const createApp = async () => {
 
       if (pathname.match(/^\/api\/admin\/bookings\/[^/]+\/balance-payment$/) && req.method === "POST") {
         if (!requireAdmin(req, res)) return;
-        const id = pathname.split("/")[4];
-        const body = await readBody(req);
-        try {
-          const result = await createBookingBalancePayment(id);
-          if (body.send_email && result.checkoutUrl) {
-            await mailer.sendBookingBalancePaymentEmail({
-              booking: result.snapshot.booking,
-              service: result.snapshot.service,
-              checkoutUrl: result.checkoutUrl,
-              amountValue: result.amountValue,
-              publicBaseUrl,
-            });
-          }
-          send.json(res, 200, {
-            booking: result.snapshot.booking,
-            checkout_url: result.checkoutUrl,
-            qr_code_url: result.qrCodeUrl,
-            amount: result.amountValue,
-          });
-        } catch (error) {
-          send.json(res, 400, { error: error instanceof Error ? error.message : "Impossible de generer le paiement du solde" });
-        }
+        send.json(res, 410, { error: "Les paiements Mollie sont desactives" });
         return;
       }
 

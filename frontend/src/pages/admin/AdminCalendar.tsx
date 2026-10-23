@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { fr } from "date-fns/locale";
-import { CalendarSync, CheckCircle2, RefreshCw } from "lucide-react";
+import { CalendarSync, CheckCircle2, RefreshCw, Link2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import { Calendar } from "@/components/ui/calendar";
 const AdminCalendar = () => {
   const queryClient = useQueryClient();
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+  const selectedKey = format(selectedDate, "yyyy-MM-dd");
 
   const { data: bookings, isLoading: bookingsLoading } = useQuery({
     queryKey: ["admin-bookings"],
@@ -22,6 +23,20 @@ const AdminCalendar = () => {
   const { data: caldavStatus, isLoading: statusLoading } = useQuery({
     queryKey: ["admin-caldav-status"],
     queryFn: api.bookings.caldavStatus,
+  });
+  const { data: googleCalendarStatus } = useQuery({
+    queryKey: ["admin-google-calendar-status"],
+    queryFn: api.bookings.googleCalendarStatus,
+  });
+  const { data: googleEvents, isLoading: googleEventsLoading } = useQuery({
+    queryKey: ["admin-google-calendar-events", selectedKey],
+    queryFn: () => api.bookings.googleCalendarEvents(selectedKey),
+    enabled: Boolean(googleCalendarStatus?.oauth_connected),
+  });
+  const connectGoogleCalendar = useMutation({
+    mutationFn: api.bookings.startGoogleCalendarOAuth,
+    onSuccess: ({ authorization_url }) => { window.location.assign(authorization_url); },
+    onError: (error: Error) => toast.error(error.message || "Impossible de lancer la connexion Google"),
   });
 
   const syncCalendar = useMutation({
@@ -67,7 +82,6 @@ const AdminCalendar = () => {
     return map;
   }, [confirmedUpcoming]);
 
-  const selectedKey = format(selectedDate, "yyyy-MM-dd");
   const selectedBookings = bookingsByDate.get(selectedKey) || [];
   const highlightedDates = useMemo(
     () => Array.from(bookingsByDate.keys()).map((key) => new Date(`${key}T12:00:00`)),
@@ -107,6 +121,34 @@ const AdminCalendar = () => {
           <p className="mt-2 font-display text-2xl text-foreground">{caldavStatus?.synced_events ?? 0}</p>
         </div>
       </div>
+
+      {(googleCalendarStatus?.oauth_configured || googleCalendarStatus?.oauth_connected) && (
+      <div className="bg-card rounded-2xl border border-border/50 p-6 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h4 className="font-medium text-foreground">Agenda Google</h4>
+            <p className="text-sm text-muted-foreground mt-1">Événements réels du compte Google connecté pour le jour sélectionné.</p>
+          </div>
+          {!googleCalendarStatus?.oauth_connected && googleCalendarStatus?.oauth_configured && (
+            <Button type="button" className="rounded-full gap-2" onClick={() => connectGoogleCalendar.mutate()} disabled={connectGoogleCalendar.isPending}>
+              <Link2 size={16} /> {connectGoogleCalendar.isPending ? "Ouverture..." : "Connecter Google Calendar"}
+            </Button>
+          )}
+        </div>
+        {googleCalendarStatus?.oauth_connected && (
+          <div className="space-y-3">
+            {googleEventsLoading && <p className="text-sm text-muted-foreground">Lecture de Google Calendar...</p>}
+            {!googleEventsLoading && googleEvents?.events.length === 0 && <p className="text-sm text-muted-foreground">Aucun événement Google ce jour.</p>}
+            {googleEvents?.events.map((event) => (
+              <div key={event.id} className="rounded-xl border border-border/50 bg-muted/20 p-4">
+                <p className="font-medium text-foreground">{event.summary}</p>
+                <p className="text-sm text-muted-foreground">{event.all_day ? "Toute la journée" : `${new Date(event.start).toLocaleTimeString("fr-BE", { hour: "2-digit", minute: "2-digit" })} – ${new Date(event.end).toLocaleTimeString("fr-BE", { hour: "2-digit", minute: "2-digit" })}`}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-[320px,1fr] gap-6">
         <div className="bg-card rounded-2xl border border-border/50 p-4 overflow-x-auto">
