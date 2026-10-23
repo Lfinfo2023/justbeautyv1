@@ -45,14 +45,14 @@ const AdminCalendar = () => {
       queryClient.invalidateQueries({ queryKey: ["admin-caldav-status"] });
 
       if (!result.enabled) {
-        toast.error("CalDAV n'est pas configure cote serveur");
+          toast.error("Aucun agenda n'est connecte cote serveur");
         return;
       }
       if (result.errors.length) {
         toast.error(`Synchro partielle: ${result.synced} rendez-vous, ${result.cleaned} nettoyage(s), ${result.errors.length} erreur(s)`);
         return;
       }
-      toast.success(`Calendrier synchronise: ${result.synced} rendez-vous, ${result.cleaned} nettoyage(s)`);
+      toast.success(`Agendas synchronises: ${result.synced} rendez-vous, ${result.cleaned} nettoyage(s)`);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Impossible de synchroniser le calendrier");
@@ -103,7 +103,7 @@ const AdminCalendar = () => {
         </div>
         <Button type="button" variant="outline" className="rounded-full gap-2 w-full sm:w-auto" onClick={() => syncCalendar.mutate()} disabled={syncCalendar.isPending}>
           <RefreshCw size={16} className={syncCalendar.isPending ? "animate-spin" : ""} />
-          {syncCalendar.isPending ? "Synchronisation..." : "Synchroniser CalDAV"}
+          {syncCalendar.isPending ? "Synchronisation..." : "Synchroniser les agendas"}
         </Button>
       </div>
 

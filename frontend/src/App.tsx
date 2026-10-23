@@ -21,6 +21,7 @@ import Account from "./pages/Account";
 import GiftCards from "./pages/GiftCards";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import LegalNotice from "./pages/LegalNotice";
+import Diapo from "./pages/Diapo";
 
 const queryClient = new QueryClient();
 
@@ -48,6 +49,7 @@ const AppRoutes = () => {
       <Route path="/cheques-cadeaux" element={<><Navbar /><GiftCards /><Footer /></>} />
       <Route path="/politique-de-confidentialite" element={<><Navbar /><PrivacyPolicy /><Footer /></>} />
       <Route path="/mentions-legales" element={<><Navbar /><LegalNotice /><Footer /></>} />
+      <Route path="/diapo" element={<Diapo />} />
       <Route path="/admin/login" element={user ? <Navigate to="/admin" replace /> : <AdminLogin />} />
       <Route path="/admin/password" element={user ? <AdminSecurity forced /> : <Navigate to="/admin/login" replace />} />
       <Route path="/admin" element={<ProtectedAdmin />} />

@@ -179,7 +179,7 @@ export interface GoogleCalendarStatus {
   calendar_id_configured: boolean;
 }
 
-export interface GoogleCalendarEvent { id: string; summary: string; start: string; end: string; all_day: boolean; }
+export interface GoogleCalendarEvent { id: string; summary: string; start: string; end: string; all_day: boolean; from_site?: boolean; }
 
 export interface PaymentSettings {
   enabled: boolean;

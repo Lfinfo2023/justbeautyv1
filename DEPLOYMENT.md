@@ -43,6 +43,8 @@ GOOGLE_OAUTH_REDIRECT_URI=https://just-beauty.be/api/admin/google-calendar/oauth
 
 `GOOGLE_CALENDAR_FAIL_CLOSED=true` est recommandé : si Google est indisponible, la journée ne peut pas être réservée par erreur. Pour la connexion directe, créez aussi dans Google Cloud des identifiants OAuth de type **Application Web**, activez Google Calendar API et ajoutez exactement l'URL `GOOGLE_OAUTH_REDIRECT_URI` dans les URI de redirection autorisées. Après redémarrage, l'admin clique sur « Connecter Google Calendar » dans Administration → Calendrier. Les jetons de reconnexion sont chiffrés côté serveur ; les événements réels ne sont affichés qu'après cette connexion.
 
+La connexion OAuth autorise également le site à créer, mettre à jour et supprimer les rendez-vous confirmés dans le calendrier Google. Après cette mise à jour, reconnectez Google Calendar une fois afin d'accorder la nouvelle autorisation d'écriture, puis utilisez « Synchroniser les agendas » pour importer les rendez-vous déjà confirmés.
+
 ## Paiements Mollie
 
 Les paiements Mollie et les acomptes en ligne sont désactivés dans l'application. Les nouvelles réservations sont créées sans redirection de paiement. Retirez également les clés `MOLLIE_API_KEY` du fichier `backend/.env` si elles y figurent encore.

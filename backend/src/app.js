@@ -779,6 +779,12 @@ const bootstrapDb = (db, env) => {
       admin_id TEXT NOT NULL,
       expires_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS google_booking_events (
+      booking_id TEXT PRIMARY KEY,
+      event_id TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS loyalty_transactions (
       id TEXT PRIMARY KEY,
       customer_id TEXT NOT NULL,
@@ -2397,18 +2403,60 @@ const createApp = async () => {
   const deleteBookingCalendarEventRecord = (bookingId) => {
     db.prepare("DELETE FROM booking_calendar_events WHERE booking_id = ?").run(bookingId);
   };
-  const syncBookingCalendar = async (snapshot) => {
-    if (!snapshot || !calDav.enabled) return;
-    const existingEvent = getBookingCalendarEvent(snapshot.booking.id);
-    if (snapshot.booking.status === "confirmed") {
-      const event = await calDav.upsertBookingEvent({ booking: snapshot.booking, service: snapshot.service, existingEvent });
-      if (event) saveBookingCalendarEvent(snapshot.booking.id, event);
+  const getGoogleBookingEvent = (bookingId) => db.prepare("SELECT * FROM google_booking_events WHERE booking_id = ?").get(bookingId) || null;
+  const saveGoogleBookingEvent = (bookingId, eventId) => db.prepare(`
+    INSERT INTO google_booking_events (booking_id, event_id, synced_at) VALUES (?, ?, ?)
+    ON CONFLICT(booking_id) DO UPDATE SET event_id = excluded.event_id, synced_at = excluded.synced_at
+  `).run(bookingId, eventId, new Date().toISOString());
+  const googleCalendarRequest = async (pathname, { method = "GET", body } = {}) => {
+    const accessToken = await getGoogleOAuthAccessToken();
+    if (!accessToken) return null;
+    const response = await fetch(`https://www.googleapis.com/calendar/v3${pathname}`, {
+      method,
+      headers: { Authorization: `Bearer ${accessToken}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!response.ok && response.status !== 404) throw new Error(`Google Calendar ${method} failed (${response.status})`);
+    return response.status === 204 || response.status === 404 ? null : response.json();
+  };
+  const syncGoogleBookingCalendar = async (snapshot) => {
+    if (!snapshot || !decryptGoogleTokens()?.refresh_token) return;
+    const existing = getGoogleBookingEvent(snapshot.booking.id);
+    if (snapshot.booking.status !== "confirmed") {
+      if (existing) {
+        await googleCalendarRequest(`/calendars/primary/events/${encodeURIComponent(existing.event_id)}`, { method: "DELETE" });
+        db.prepare("DELETE FROM google_booking_events WHERE booking_id = ?").run(snapshot.booking.id);
+      }
       return;
     }
-    if (existingEvent) {
+    const start = `${snapshot.booking.booking_date}T${snapshot.booking.booking_time}:00`;
+    const end = addMinutesToTime(snapshot.booking.booking_time, snapshot.service.duration_minutes || DEFAULT_SERVICE_DURATION_MINUTES);
+    const serviceLabel = [snapshot.service.category, snapshot.service.name].filter(Boolean).join(" - ");
+    const payload = {
+      summary: `Just Beauty - ${snapshot.booking.client_name} - ${serviceLabel}`,
+      description: `Cliente: ${snapshot.booking.client_name}\nEmail: ${snapshot.booking.client_email}\nTelephone: ${snapshot.booking.client_phone || "Non renseigne"}`,
+      start: { dateTime: start, timeZone: env.GOOGLE_CALENDAR_TIMEZONE || "Europe/Brussels" },
+      end: { dateTime: `${snapshot.booking.booking_date}T${end}:00`, timeZone: env.GOOGLE_CALENDAR_TIMEZONE || "Europe/Brussels" },
+      extendedProperties: { private: { justbeautyBookingId: snapshot.booking.id } },
+    };
+    const event = await googleCalendarRequest(
+      existing ? `/calendars/primary/events/${encodeURIComponent(existing.event_id)}` : "/calendars/primary/events",
+      { method: existing ? "PUT" : "POST", body: payload },
+    );
+    if (event?.id) saveGoogleBookingEvent(snapshot.booking.id, event.id);
+  };
+  const syncBookingCalendar = async (snapshot) => {
+    if (!snapshot) return;
+    const existingEvent = getBookingCalendarEvent(snapshot.booking.id);
+    if (calDav.enabled && snapshot.booking.status === "confirmed") {
+      const event = await calDav.upsertBookingEvent({ booking: snapshot.booking, service: snapshot.service, existingEvent });
+      if (event) saveBookingCalendarEvent(snapshot.booking.id, event);
+    }
+    if (calDav.enabled && snapshot.booking.status !== "confirmed" && existingEvent) {
       await calDav.deleteBookingEvent(existingEvent);
       deleteBookingCalendarEventRecord(snapshot.booking.id);
     }
+    await syncGoogleBookingCalendar(snapshot);
   };
   const syncAllConfirmedBookings = async () => {
     const confirmedBookingIds = db.prepare("SELECT id FROM bookings WHERE status = 'confirmed' ORDER BY booking_date, booking_time").all();
@@ -2448,7 +2496,7 @@ const createApp = async () => {
       }
     }
 
-    return { synced, cleaned, errors, enabled: calDav.enabled };
+    return { synced, cleaned, errors, enabled: calDav.enabled || Boolean(decryptGoogleTokens()?.refresh_token) };
   };
   const syncConfirmedBookingsForService = async (serviceId) => {
     const rows = db.prepare("SELECT id FROM bookings WHERE service_id = ? AND status = 'confirmed' ORDER BY booking_date, booking_time").all(serviceId);
@@ -2641,12 +2689,12 @@ const createApp = async () => {
     const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`, { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!response.ok) throw new Error(`Google Calendar events failed (${response.status})`);
     const payload = await response.json();
-    return (payload.items || []).filter((event) => event.status !== "cancelled").map((event) => ({ id: event.id, summary: event.summary || "Occupation", start: event.start?.dateTime || event.start?.date || "", end: event.end?.dateTime || event.end?.date || "", all_day: Boolean(event.start?.date) }));
+    return (payload.items || []).filter((event) => event.status !== "cancelled").map((event) => ({ id: event.id, summary: event.summary || "Occupation", start: event.start?.dateTime || event.start?.date || "", end: event.end?.dateTime || event.end?.date || "", all_day: Boolean(event.start?.date), from_site: Boolean(event.extendedProperties?.private?.justbeautyBookingId) }));
   };
   const isGoogleDateBlocked = async (date, options) => {
     try {
       const events = await getGoogleCalendarEvents(date);
-      if (events) return { blocked: events.length > 0, reason: "oauth" };
+      if (events) return { blocked: events.some((event) => !event.from_site), reason: "oauth" };
     } catch (error) {
       console.warn("Google OAuth calendar check failed:", error instanceof Error ? error.message : error);
       return { blocked: true, reason: "unavailable" };
@@ -3843,7 +3891,7 @@ const createApp = async () => {
           client_id: config.clientId,
           redirect_uri: config.redirectUri,
           response_type: "code",
-          scope: "https://www.googleapis.com/auth/calendar.readonly",
+          scope: "https://www.googleapis.com/auth/calendar.events",
           access_type: "offline",
           prompt: "consent",
           state,
